@@ -1,0 +1,38 @@
+name: Auto Train Boat AI
+
+on:
+  schedule:
+    # 毎日日本時間の朝6時（UTCの21時）に自動実行
+    - cron: '0 21 * * *'
+  workflow_dispatch: # 手動でもいつでも動かせるボタン
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pandas numpy requests beautifulsoup4 scikit-learn lightgbm joblib
+
+      - name: Run training script
+        run: |
+          python train.py
+
+      - name: Commit and push changes if brain updated
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git config --global user.name "Boat AI Bot"
+          git config --global user.email "bot@example.com"
+          git add boat_ai_brain_v9.pkl
+          git diff --quiet && git diff --cached --quiet || (git commit -m "🤖 毎日自動：AIの脳みそを最新データでアップデート" && git push)
