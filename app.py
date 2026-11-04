@@ -9,7 +9,7 @@ import re
 import itertools
 
 # ページの基本設定
-st.set_page_config(page_title="ボートレースAI【今節調子・完全連動版】", layout="centered")
+st.set_page_config(page_title="ボートレースAI【外枠リスク評価・完全版】", layout="centered")
 
 # 1. AIと各種辞書の読み込み
 @st.cache_resource
@@ -34,7 +34,7 @@ VENUE_MAP = {
     "下関": "19", "若松": "20", "芦屋": "21", "福岡": "22", "唐津": "23", "大村": "24"
 }
 
-# 2. スクレイピング関数（今節成績・着順の傾向も網羅！）
+# 2. スクレイピング関数
 def scrape_boatrace_data_v9(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
@@ -68,17 +68,12 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
                 t_m2 = re.search(r'(\d{4})', text_data)
                 toban = int(t_m2.group(1)) if t_m2 else 0
             
-            # 今節の成績（着順の数字や「1着」「2着」などのテキスト）を抽出して調子を数値化
-            # 例: 1走目、2走目の着順を拾う
             recent_results = re.findall(r'\b([1-6])\b', tbody.text)
-            # ざっくり今節の平均着順や好走率を計算（数字が取れれば活用）
             numeric_results = [int(x) for x in recent_results if x in ['1','2','3','4','5','6']]
-            # 直近の着順が良い（1着や2着が多い）ほど調子ポイントを高くする
             if numeric_results:
-                # 1着の多さや平均着順を簡易評価
-                avg_finish = sum(numeric_results[-3:]) / len(numeric_results[-3:]) # 直近3走の平均着順
+                avg_finish = sum(numeric_results[-3:]) / len(numeric_results[-3:])
             else:
-                avg_finish = 3.5 # デフォルト
+                avg_finish = 3.5
             
             tds = tbody.find_all('td')
             try:
@@ -91,7 +86,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
                 '級別': rank, 
                 'モーター': motor, 
                 '展示': 0.0,
-                '今節調子スコア': max(0.5, (6.0 - avg_finish) / 2.5) # 調子が良いと1.2〜1.5、悪いと0.5など
+                '今節調子スコア': max(0.5, (6.0 - avg_finish) / 2.5)
             }
             
         res_before = requests.get(url_before, headers=headers)
@@ -117,7 +112,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
     except Exception as e:
         return None, None, False, f"読み込み失敗: {str(e)}"
 
-# 3. 予想実行関数（★選手・モーター・コース・展開 ＋「今節の調子」を完全融合）
+# 3. 予想実行関数（★外枠での大敗傾向＝3連対率が低い選手の評価を厳しく下げるロジックを搭載）
 def predict_race_auto_v9(target_date, venue, race_num):
     boat_data, env_data, success, msg = scrape_boatrace_data_v9(target_date, venue, race_num)
     if not success: return msg
@@ -149,78 +144,21 @@ def predict_race_auto_v9(target_date, venue, race_num):
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
     
-    # 【王道セオリー ＋ 今節調子の連動反映】
+    # 【1着の適正化：外枠リスク評価の連動】
     adjusted_1st = np.zeros(6)
     for i in range(6):
         waku = i + 1
         rank = boat_data[waku]['級別']
-        rhythm_score = boat_data[waku]['今節調子スコア'] # 今節のリズム・好調度
+        rhythm = boat_data[waku]['今節調子スコア']
+        t_rate_3ren = input_dict[f'{waku}枠_3連対率'] # そのコースでの3連対率
         
-        # 選手実力(級別) ＋ コース有利度 ＋ 今節の調子(リズム)を掛け合わせる
-        r_weight = 1.7 if rank == "A1" else (1.2 if rank == "A2" else (0.9 if rank == "B1" else 0.5))
-        c_weight = 2.2 if waku == 1 else (1.5 if waku == 2 else (1.0 if waku == 3 else (0.5 if waku == 4 else (0.3 if waku == 5 else 0.2))))
+        r_weight = 1.7 if rank == "A1" else (1.2 if rank == "A2" else (0.9 if rank == "B1" else 0.4))
         
-        adjusted_1st[i] = preds_1st[i] * r_weight * c_weight * rhythm_score
-        
-    preds_1st = adjusted_1st / np.sum(adjusted_1st)
-
-    adjusted_2nd = np.zeros(6)
-    for i in range(6):
-        waku = i + 1
-        rank = boat_data[waku]['級別']
-        rhythm_score = boat_data[waku]['今節調子スコア']
-        
-        r_weight = 1.3 if rank == "A1" else (1.1 if rank == "A2" else 0.8)
-        c_weight = 1.3 if waku <= 2 else (1.0 if waku == 3 else (0.8 if waku == 4 else 0.5))
-        
-        adjusted_2nd[i] = preds_2nd[i] * r_weight * c_weight * rhythm_score
-    preds_2nd = adjusted_2nd / np.sum(adjusted_2nd)
-
-    combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
-    raw_probs = []
-    for (r1, r2, r3) in combos:
-        if r1 == r2 or r2 == r3 or r1 == r3: continue
-        p = preds_1st[r1] * preds_2nd[r2] * preds_3rd[r3]
-        raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", p))
-        
-    total_p = sum(x[1] for x in raw_probs)
-    final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
-    
-    result_text = f"🌐 【今節調子連動・王道堅実版】解析完了！\n"
-    result_text += f"🌪️ 水面環境: 風速 {env_data['風速']}m / 波高 {env_data['波高']}cm\n\n"
-    
-    for i in range(1, 7):
-        r = boat_data[i]['級別']
-        st = input_dict[f'{i}枠_平均ST']
-        r_score = boat_data[i]['今節調子スコア']
-        result_text += f"{i}枠({r}): 登番{boat_data[i]['登番']} / 調子スコア:{r_score:.2f} / ST:{st:.2f} / 展示:{boat_data[i]['展示']}\n"
-        
-    prob_sorted = sorted(final_probs, key=lambda x: x[1], reverse=True)
-    
-    result_text += f"\n🎯 今節リズム考慮・推奨買い目（上位6点）\n"
-    result_text += "-" * 50 + "\n"
-    for i, item in enumerate(prob_sorted[:6]):
-        result_text += f"推奨 {i+1}点目: 【{item[0]}】 予想確率: {item[1]:>4.1f}%\n"
-
-    result_text += "-" * 50 + "\n"
-    result_text += f"・本命軸: 【{prob_sorted[0][0]}】 (確率 {prob_sorted[0][1]:.1f}%)\n"
-
-    return result_text
-
-# Streamlitの画面デザイン
-st.title("🚤 ボートレースAI【今節調子・完全連動版】")
-
-today_str = datetime.datetime.now().strftime('%Y%m%d')
-
-col1, col2, col3 = st.columns(3)
-with col1:
-    target_date = st.text_input("日付 (例: 20261103)", value=today_str)
-with col2:
-    venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=9)
-with col3:
-    race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1)
-
-if st.button("⚡ 今節の調子を含めて予想！", type="primary"):
-    with st.spinner("今節成績や選手の勢いも加味して解析中..."):
-        res = predict_race_auto_v9(target_date, venue, race_num)
-        st.text_area("AIの調子連動解析結果", value=res, height=450)
+        # 4〜6コース（外枠）で、もともと3連対率が低い（＝4〜6着が多い）選手は評価をさらに大きく減点する
+        if waku >= 4:
+            # 3連対率が20%未満なら容赦なく評価を下げる
+            outer_risk_penalty = max(0.3, t_rate_3ren * 3.0) 
+        else:
+            outer_risk_penalty = 1.0
+            
+        c_weight = 2
