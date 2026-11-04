@@ -9,7 +9,7 @@ import re
 import itertools
 
 # ページの基本設定
-st.set_page_config(page_title="ボートレースAI【Ver 9.0 完全適正化版】", layout="centered")
+st.set_page_config(page_title="ボートレースAI【王道セオリー・堅実特化版】", layout="centered")
 
 # 1. AIと各種辞書の読み込み
 @st.cache_resource
@@ -34,7 +34,7 @@ VENUE_MAP = {
     "下関": "19", "若松": "20", "芦屋": "21", "福岡": "22", "唐津": "23", "大村": "24"
 }
 
-# 2. スクレイピング関数
+# 2. スクレイピング関数（選手級別・モーター・展示・ST情報を完璧に取得）
 def scrape_boatrace_data_v9(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
@@ -99,7 +99,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
     except Exception as e:
         return None, None, False, f"読み込み失敗: {str(e)}"
 
-# 3. 予想実行関数（★1着・2着・3着すべてにおいて、枠番・級別の現実的バランスを適正化）
+# 3. 予想実行関数（★「選手・モーター・コース・展開」の王道セオリーを完全に体現したロジック）
 def predict_race_auto_v9(target_date, venue, race_num):
     boat_data, env_data, success, msg = scrape_boatrace_data_v9(target_date, venue, race_num)
     if not success: return msg
@@ -131,31 +131,36 @@ def predict_race_auto_v9(target_date, venue, race_num):
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
     
-    # 【1着の補正】A1や内枠を優遇、4号艇以降の理不尽な頭を抑制
+    # 【セオリー反映①：1着（頭）の王道補正】
+    # サイトに書いてある通り「A1級」「1〜2コース（枠）」の有利さを基本軸にし、格下や外枠の無茶な頭をしっかり排除する
     adjusted_1st = np.zeros(6)
     for i in range(6):
         waku = i + 1
-        rank = boat_data[waku]['級別']
-        rank_w = 1.4 if rank == "A1" else (1.1 if rank == "A2" else (0.9 if rank == "B1" else 0.6))
-        waku_w = 1.5 if waku <= 2 else (1.0 if waku == 3 else (0.7 if waku == 4 else 0.5))
-        adjusted_1st[i] = preds_1st[i] * rank_w * waku_w
+        rank = boat_data[i+1]['級別']
+        
+        # 選手の実力（級別）による重み
+        r_weight = 1.8 if rank == "A1" else (1.3 if rank == "A2" else (0.8 if rank == "B1" else 0.4))
+        # コース（枠番）の圧倒的な有利・不利（1コース絶対有利のセオリー）
+        c_weight = 2.5 if waku == 1 else (1.5 if waku == 2 else (1.0 if waku == 3 else (0.5 if waku == 4 else (0.3 if waku == 5 else 0.2))))
+        
+        adjusted_1st[i] = preds_1st[i] * r_weight * c_weight
+        
     preds_1st = adjusted_1st / np.sum(adjusted_1st)
 
-    # 【2着の補正】★ここがポイント！大外6号艇などが不自然に2着に絡むのを強力に減点する
+    # 【セオリー反映②：2着・3着（ヒモ）の王道補正】
+    # 外枠や格下選手が不自然に上位着に残るのを抑え、手堅い筋（1-2, 1-3, 2-1など）がしっかり残るように調整
     adjusted_2nd = np.zeros(6)
     for i in range(6):
         waku = i + 1
-        rank = boat_data[waku]['級別']
-        rank_w = 1.3 if rank == "A1" else (1.1 if rank == "A2" else 0.9)
-        # 2着は内枠（1〜3枠）が圧倒的に有利なので、外枠（5・6枠）の2着率を自然な形に抑える
-        waku_w = 1.3 if waku <= 2 else (1.0 if waku == 3 else (0.8 if waku == 4 else (0.5 if waku == 5 else 0.4)))
-        adjusted_2nd[i] = preds_2nd[i] * rank_w * waku_w
+        rank = boat_data[i+1]['級別']
+        r_weight = 1.3 if rank == "A1" else (1.1 if rank == "A2" else 0.8)
+        c_weight = 1.4 if waku <= 2 else (1.1 if waku == 3 else (0.8 if waku == 4 else 0.5))
+        adjusted_2nd[i] = preds_2nd[i] * r_weight * c_weight
     preds_2nd = adjusted_2nd / np.sum(adjusted_2nd)
 
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
     for (r1, r2, r3) in combos:
-        # 同一選手が1着と2着になるなどの矛盾を防ぐ
         if r1 == r2 or r2 == r3 or r1 == r3: continue
         p = preds_1st[r1] * preds_2nd[r2] * preds_3rd[r3]
         raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", p))
@@ -163,8 +168,8 @@ def predict_race_auto_v9(target_date, venue, race_num):
     total_p = sum(x[1] for x in raw_probs)
     final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
     
-    result_text = f"🌐 【Ver 9.0 ヒモ適正化・完全版】解析完了！\n"
-    result_text += f"🌪️ 環境: 風速 {env_data['風速']}m / 波高 {env_data['波高']}cm\n\n"
+    result_text = f"🌐 【王道セオリー・堅実特化版】解析完了！\n"
+    result_text += f"🌪️ 水面環境: 風速 {env_data['風速']}m / 波高 {env_data['波高']}cm\n\n"
     
     for i in range(1, 7):
         r = boat_data[i]['級別']
@@ -173,7 +178,7 @@ def predict_race_auto_v9(target_date, venue, race_num):
         
     prob_sorted = sorted(final_probs, key=lambda x: x[1], reverse=True)
     
-    result_text += f"\n🎯 現実的・推奨買い目（上位6点）\n"
+    result_text += f"\n🎯 王道セオリー推奨買い目（上位6点）\n"
     result_text += "-" * 50 + "\n"
     for i, item in enumerate(prob_sorted[:6]):
         result_text += f"推奨 {i+1}点目: 【{item[0]}】 予想確率: {item[1]:>4.1f}%\n"
@@ -184,7 +189,7 @@ def predict_race_auto_v9(target_date, venue, race_num):
     return result_text
 
 # Streamlitの画面デザイン
-st.title("🚤 ボートレースAI【Ver 9.0】ヒモ適正化・完全版")
+st.title("🚤 ボートレースAI【王道セオリー・堅実特化版】")
 
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
@@ -196,7 +201,7 @@ with col2:
 with col3:
     race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1)
 
-if st.button("⚡ 納得の買い目を計算！", type="primary"):
-    with st.spinner("2着・3着のバランスを整えて解析中..."):
+if st.button("⚡ 王道セオリーで予想！", type="primary"):
+    with st.spinner("選手・モーター・コース・展開を総合評価中..."):
         res = predict_race_auto_v9(target_date, venue, race_num)
-        st.text_area("AIの現実的解析結果", value=res, height=450)
+        st.text_area("AIの王道解析結果", value=res, height=450)
