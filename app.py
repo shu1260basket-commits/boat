@@ -161,4 +161,77 @@ def predict_race_auto_v9(target_date, venue, race_num):
         else:
             outer_risk_penalty = 1.0
             
-        c_weight = 2
+        c_weight = 2.0 if waku == 1 else (1.4 if waku == 2 else (1.0 if waku == 3 else (0.3 * outer_risk_penalty if waku == 4 else (0.2 * outer_risk_penalty if waku == 5 else 0.1 * outer_risk_penalty))))
+        
+        adjusted_1st[i] = preds_1st[i] * r_weight * c_weight * rhythm
+        
+    preds_1st = adjusted_1st / np.sum(adjusted_1st)
+
+    # 【2着・3着の適正化：外枠の大敗リスク反映】
+    adjusted_2nd = np.zeros(6)
+    for i in range(6):
+        waku = i + 1
+        rank = boat_data[waku]['級別']
+        rhythm = boat_data[waku]['今節調子スコア']
+        t_rate_3ren = input_dict[f'{waku}枠_3連対率']
+        
+        r_weight = 1.3 if rank == "A1" else (1.1 if rank == "A2" else 0.8)
+        
+        if waku >= 4 and t_rate_3ren < 0.15:
+            outer_2nd_penalty = 0.4 # 外枠で舟券に絡めないデータなら2着評価も下げる
+        else:
+            outer_2nd_penalty = 1.0
+            
+        c_weight = (1.3 if waku <= 2 else (1.0 if waku == 3 else 0.6 * outer_2nd_penalty))
+        
+        adjusted_2nd[i] = preds_2nd[i] * r_weight * c_weight * rhythm
+    preds_2nd = adjusted_2nd / np.sum(adjusted_2nd)
+
+    combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
+    raw_probs = []
+    for (r1, r2, r3) in combos:
+        if r1 == r2 or r2 == r3 or r1 == r3: continue
+        p = preds_1st[r1] * preds_2nd[r2] * preds_3rd[r3]
+        raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", p))
+        
+    total_p = sum(x[1] for x in raw_probs)
+    final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
+    
+    result_text = f"🌐 【外枠大敗リスク評価連動版】解析完了！\n"
+    result_text += f"🌪️ 水面環境: 風速 {env_data['風速']}m / 波高 {env_data['波高']}cm\n\n"
+    
+    for i in range(1, 7):
+        r = boat_data[i]['級別']
+        st = input_dict[f'{i}枠_平均ST']
+        rate3 = input_dict[f'{i}枠_3連対率'] * 100
+        result_text += f"{i}枠({r}): 当該コース3連対率 {rate3:.1f}% / ST:{st:.2f}\n"
+        
+    prob_sorted = sorted(final_probs, key=lambda x: x[1], reverse=True)
+    
+    result_text += f"\n🎯 現実的・推奨買い目（上位6点）\n"
+    result_text += "-" * 50 + "\n"
+    for i, item in enumerate(prob_sorted[:6]):
+        result_text += f"推奨 {i+1}点目: 【{item[0]}】 予想確率: {item[1]:>4.1f}%\n"
+
+    result_text += "-" * 50 + "\n"
+    result_text += f"・本命軸: 【{prob_sorted[0][0]}】 (確率 {prob_sorted[0][1]:.1f}%)\n"
+
+    return result_text
+
+# Streamlitの画面デザイン
+st.title("🚤 ボートレースAI【外枠リスク評価連動版】")
+
+today_str = datetime.datetime.now().strftime('%Y%m%d')
+
+col1, col2, col3 = st.columns(3)
+with col1:
+    target_date = st.text_input("日付 (例: 20261103)", value=today_str)
+with col2:
+    venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=9)
+with col3:
+    race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1)
+
+if st.button("⚡ 外枠リスクを考慮して予想！", type="primary"):
+    with st.spinner("外枠の成績や大敗リスクを分析中..."):
+        res = predict_race_auto_v9(target_date, venue, race_num)
+        st.text_area("AIの最終解析結果", value=res, height=450)
