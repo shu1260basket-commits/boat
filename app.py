@@ -9,9 +9,9 @@ import re
 import itertools
 
 # ページの基本設定
-st.set_page_config(page_title="ボートレースAI【Ver 9.0】", layout="centered")
+st.set_page_config(page_title="ボートレースAI【Ver 9.0 堅実特化版】", layout="centered")
 
-# 1. 【Ver 9.0】3つの神AIと各種辞書の読み込み
+# 1. AIと各種辞書の読み込み
 @st.cache_resource
 def load_brain():
     with open('boat_ai_brain_v9.pkl', 'rb') as f:
@@ -34,7 +34,7 @@ VENUE_MAP = {
     "下関": "19", "若松": "20", "芦屋": "21", "福岡": "22", "唐津": "23", "大村": "24"
 }
 
-# 2. スクレイピング関数（風・波・展示・ST情報）
+# 2. スクレイピング関数
 def scrape_boatrace_data_v9(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
@@ -93,7 +93,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
     except Exception as e:
         return None, None, False, f"読み込み失敗: {str(e)}"
 
-# 3. 予想実行関数（純粋AI的中特化版）
+# 3. 予想実行関数（★現実的・堅実重視の補正ロジックを追加）
 def predict_race_auto_v9(target_date, venue, race_num):
     boat_data, env_data, success, msg = scrape_boatrace_data_v9(target_date, venue, race_num)
     if not success: return msg
@@ -125,6 +125,12 @@ def predict_race_auto_v9(target_date, venue, race_num):
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
     
+    # ★【現実的補正】1号艇の1着確率が極端に低く出すぎるのを防ぎ、インの定石を少し優遇する
+    # 1号艇の1着確率に1.2倍の現実的ボーナスを付与（暴走した大穴頭をマイルドにする）
+    preds_1st[0] = preds_1st[0] * 1.25
+    # 確率の合計を100%（1.0）に再正規化
+    preds_1st = preds_1st / np.sum(preds_1st)
+
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
     for (r1, r2, r3) in combos:
@@ -134,37 +140,38 @@ def predict_race_auto_v9(target_date, venue, race_num):
     total_p = sum(x[1] for x in raw_probs)
     final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
     
-    result_text = f"🌐 【Ver 9.0 神AI・的中特化版】データ取得完了！\n"
-    result_text += f"🌪️ リアルタイム環境: 風速 {env_data['風速']}m / 波高 {env_data['波高']}cm\n\n"
+    result_text = f"🌐 【Ver 9.0 堅実・現実的狙い目版】解析完了！\n"
+    result_text += f"🌪️ 環境: 風速 {env_data['風速']}m / 波高 {env_data['波高']}cm\n\n"
     
     for i in range(1, 7):
         st = input_dict[f'{i}枠_平均ST']
         m_2ren = input_dict[f'{i}枠_M2連対'] * 100
-        result_text += f"{i}枠: 登番{boat_data[i]['登番']} / 平均ST: {st:.2f} / 当場M2連対: {m_2ren:.1f}% / 展示: {boat_data[i]['展示']}\n"
+        result_text += f"{i}枠: 登番{boat_data[i]['登番']} / 平均ST: {st:.2f} / M2連対: {m_2ren:.1f}% / 展示: {boat_data[i]['展示']}\n"
         
     prob_sorted = sorted(final_probs, key=lambda x: x[1], reverse=True)
     top_prob = prob_sorted[0][1]
     
-    if top_prob > 12.0:
-        race_mood = "🟢【鉄板レース】本命が強い！"
-    elif top_prob > 7.0:
-        race_mood = "🟡【中穴レース】ヒモ荒れ注意"
+    if top_prob > 15.0:
+        race_mood = "🟢【鉄板レース】本命イン信頼度高！"
+    elif top_prob > 8.0:
+        race_mood = "🟡【本線勝負】上位人気中心の堅実決着"
     else:
-        race_mood = "🔴【大波乱レース】軸不在！何が来てもおかしくない"
+        race_mood = "🔴【混戦レース】軸選びに注意が必要"
 
-    result_text += f"\n🎯 AI的中率ランキング ({race_mood})\n"
+    result_text += f"\n🎯 現実的・推奨買い目 ({race_mood})\n"
     result_text += "-" * 50 + "\n"
-    for i, item in enumerate(prob_sorted[:8]):
-        result_text += f"本線 {i+1}位: 【{item[0]}】 的中確率: {item[1]:>4.1f}%\n"
+    for i, item in enumerate(prob_sorted[:6]):
+        result_text += f"推奨 {i+1}点目: 【{item[0]}】 予想確率: {item[1]:>4.1f}%\n"
 
     result_text += "-" * 50 + "\n"
-    for i in range(4):
-        result_text += f"・本命 {i+1}点目: 【{prob_sorted[i][0]}】 (確率: {prob_sorted[i][1]:.1f}%)\n"
+    result_text += "💡 【AIの狙い目アドバイス】\n"
+    result_text += f"・本命軸: 【{prob_sorted[0][0]}】 (確率 {prob_sorted[0][1]:.1f}%)\n"
+    result_text += f"・対抗厚め: 【{prob_sorted[1][0]}】 / 【{prob_sorted[2][0]}】\n"
 
     return result_text
 
 # Streamlitの画面デザイン
-st.title("🚤 ボートレースAI【Ver 9.0】的中・展開特化アプリ")
+st.title("🚤 ボートレースAI【Ver 9.0】堅実・現実的狙い目版")
 
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
@@ -176,7 +183,7 @@ with col2:
 with col3:
     race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1)
 
-if st.button("⚡ AI予想を実行！", type="primary"):
-    with st.spinner("リアルタイムデータを取得して解析中..."):
+if st.button("⚡ 現実的な買い目を計算！", type="primary"):
+    with st.spinner("堅実なロジックで解析中..."):
         res = predict_race_auto_v9(target_date, venue, race_num)
-        st.text_area("AIの解析結果", value=res, height=450)
+        st.text_area("AIの現実的解析結果", value=res, height=450)
