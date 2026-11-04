@@ -9,7 +9,7 @@ import re
 import itertools
 
 # ページの基本設定
-st.set_page_config(page_title="ボートレースAI【Ver 9.0 堅実補正版】", layout="centered")
+st.set_page_config(page_title="ボートレースAI【Ver 9.0 完全適正化版】", layout="centered")
 
 # 1. AIと各種辞書の読み込み
 @st.cache_resource
@@ -64,7 +64,6 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
             toban = int(toban_match.group(1)) if toban_match else 0
             rank = toban_match.group(2) if toban_match else "B2"
             
-            # フォールバック
             if toban == 0:
                 t_m2 = re.search(r'(\d{4})', text_data)
                 toban = int(t_m2.group(1)) if t_m2 else 0
@@ -100,7 +99,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
     except Exception as e:
         return None, None, False, f"読み込み失敗: {str(e)}"
 
-# 3. 予想実行関数（★4号艇暴走を抑え、実力・級別に合わせた強力補正版）
+# 3. 予想実行関数（★1着・2着・3着すべてにおいて、枠番・級別の現実的バランスを適正化）
 def predict_race_auto_v9(target_date, venue, race_num):
     boat_data, env_data, success, msg = scrape_boatrace_data_v9(target_date, venue, race_num)
     if not success: return msg
@@ -132,38 +131,39 @@ def predict_race_auto_v9(target_date, venue, race_num):
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
     
-    # ★【超重要：4号艇の異常な暴走を強制キャンセル＆級別・枠番による現実的補正】
-    # ボートレースの基本：1枠はイン有利、A1選手は強い。それぞれの1着率データ（rate_1st）をベースに確率を補正する。
+    # 【1着の補正】A1や内枠を優遇、4号艇以降の理不尽な頭を抑制
     adjusted_1st = np.zeros(6)
     for i in range(6):
         waku = i + 1
         rank = boat_data[waku]['級別']
-        base_p = preds_1st[i]
-        
-        # 級別による重み付け（A1は強く、B1は少し抑える）
-        rank_weight = 1.5 if rank == "A1" else (1.2 if rank == "A2" else (0.8 if rank == "B1" else 0.5))
-        
-        # 枠番による基本補正（1号艇はイン有利のボーナス、4号艇の理不尽な飛び出しを抑制）
-        waku_weight = 1.8 if waku == 1 else (1.3 if waku == 2 else (1.0 if waku == 3 else (0.6 if waku == 4 else 0.7)))
-        
-        # 選手の持っている本来の1着率も加味
-        racer_1st_rate = input_dict[f'{waku}枠_1着率'] + 0.05
-        
-        adjusted_1st[i] = base_p * rank_weight * waku_weight * racer_1st_rate
-
-    # 合計を100%に正規化
+        rank_w = 1.4 if rank == "A1" else (1.1 if rank == "A2" else (0.9 if rank == "B1" else 0.6))
+        waku_w = 1.5 if waku <= 2 else (1.0 if waku == 3 else (0.7 if waku == 4 else 0.5))
+        adjusted_1st[i] = preds_1st[i] * rank_w * waku_w
     preds_1st = adjusted_1st / np.sum(adjusted_1st)
+
+    # 【2着の補正】★ここがポイント！大外6号艇などが不自然に2着に絡むのを強力に減点する
+    adjusted_2nd = np.zeros(6)
+    for i in range(6):
+        waku = i + 1
+        rank = boat_data[waku]['級別']
+        rank_w = 1.3 if rank == "A1" else (1.1 if rank == "A2" else 0.9)
+        # 2着は内枠（1〜3枠）が圧倒的に有利なので、外枠（5・6枠）の2着率を自然な形に抑える
+        waku_w = 1.3 if waku <= 2 else (1.0 if waku == 3 else (0.8 if waku == 4 else (0.5 if waku == 5 else 0.4)))
+        adjusted_2nd[i] = preds_2nd[i] * rank_w * waku_w
+    preds_2nd = adjusted_2nd / np.sum(adjusted_2nd)
 
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
     for (r1, r2, r3) in combos:
+        # 同一選手が1着と2着になるなどの矛盾を防ぐ
+        if r1 == r2 or r2 == r3 or r1 == r3: continue
         p = preds_1st[r1] * preds_2nd[r2] * preds_3rd[r3]
         raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", p))
         
     total_p = sum(x[1] for x in raw_probs)
     final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
     
-    result_text = f"🌐 【Ver 9.0 級別・枠番適正化版】解析完了！\n"
+    result_text = f"🌐 【Ver 9.0 ヒモ適正化・完全版】解析完了！\n"
     result_text += f"🌪️ 環境: 風速 {env_data['風速']}m / 波高 {env_data['波高']}cm\n\n"
     
     for i in range(1, 7):
@@ -184,7 +184,7 @@ def predict_race_auto_v9(target_date, venue, race_num):
     return result_text
 
 # Streamlitの画面デザイン
-st.title("🚤 ボートレースAI【Ver 9.0】現実的適正化版")
+st.title("🚤 ボートレースAI【Ver 9.0】ヒモ適正化・完全版")
 
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
@@ -196,7 +196,7 @@ with col2:
 with col3:
     race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1)
 
-if st.button("⚡ 正常な買い目を計算！", type="primary"):
-    with st.spinner("暴走を抑えて解析中..."):
+if st.button("⚡ 納得の買い目を計算！", type="primary"):
+    with st.spinner("2着・3着のバランスを整えて解析中..."):
         res = predict_race_auto_v9(target_date, venue, race_num)
         st.text_area("AIの現実的解析結果", value=res, height=450)
