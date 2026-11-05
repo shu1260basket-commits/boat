@@ -75,7 +75,6 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
             else:
                 avg_finish = 3.5
             
-            # モーター番号を少し広めに抽出（公式サイトの構造ズレ対策）
             try:
                 motor_match = re.findall(r'\b(\d{1,3})\b', tbody.text)
                 motor = int(motor_match[-6]) if len(motor_match) > 6 else 0
@@ -141,16 +140,23 @@ def predict_race_auto_v9(target_date, venue, race_num):
         input_dict[f'{w}枠_3連対率'] = rate_3ren
         input_dict[f'{w}枠_平均ST'] = avg_st
         
-        # 🔥【修正】モーター辞書を総当たりで検索して確実にデータを引っこ抜く！
+        # モーター辞書の完全総当たり検索
         m_stats = motor_stat_dict.get((int(env_data['会場']), int(motor)), {})
         if not m_stats:
             m_stats = motor_stat_dict.get(int(motor), motor_stat_dict.get(str(motor), {}))
             
-        m_2ren = float(m_stats.get('2連対率', m_stats.get('2連率', m_stats.get('m_rate_2ren', 0.0))))
+        m_2ren = 0.0
+        m_3ren = 0.0
+        for k, v in m_stats.items():
+            ks = str(k)
+            if '2連' in ks or '2ren' in ks: m_2ren = float(v)
+            if '3連' in ks or '3ren' in ks: m_3ren = float(v)
+            
         if m_2ren > 1.0: m_2ren /= 100.0
+        if m_3ren > 1.0: m_3ren /= 100.0
         
         input_dict[f'{w}枠_M2連対'] = m_2ren
-        input_dict[f'{w}枠_M3連対'] = float(m_stats.get('3連対率', m_stats.get('3連率', 0.0)))
+        input_dict[f'{w}枠_M3連対'] = m_3ren
 
     X_pred = pd.DataFrame([input_dict], columns=train_features)
     
@@ -186,11 +192,18 @@ def predict_race_auto_v9(target_date, venue, race_num):
     in_rank = boat_data[1]['級別']
     rank_score_map = {"A1": 4, "A2": 3, "B1": 2, "B2": 1}
     in_rank_val = rank_score_map.get(in_rank, 2)
+    course_3_rank_val = rank_score_map.get(boat_data[3]['級別'], 2)
+    wind = env_data['風速']
+    
+    # 展示タイムの平均を計算（直前気配の偏差を出すため）
+    tenji_times = [boat_data[w]['展示'] for w in range(1, 7) if boat_data[w]['展示'] > 0]
+    avg_tenji = sum(tenji_times) / len(tenji_times) if tenji_times else 0
     
     for i in range(6):
         waku = i + 1
         rank = boat_data[waku]['級別']
         rank_val = rank_score_map.get(rank, 2)
+        tenji = boat_data[waku]['展示']
         
         ai_pt = preds_1st[i] * 50.0
         rank_pt = {"A1": 25, "A2": 15, "B1": 5, "B2": 0}.get(rank, 5)
@@ -203,23 +216,40 @@ def predict_race_auto_v9(target_date, venue, race_num):
         
         course_pt = {1: 20, 2: 10, 3: 5, 4: 5, 5: 0, 6: -5}[waku]
         
+        # 1. 基本の展開スコア（イン飛び＆格上キラー）
         scenario_pt = 0
-        # インがB級なら無条件で減点
         if waku == 1 and in_rank_val <= 2:
             scenario_pt -= 25 
-            
-        # 🔥【格上キラーロジック】インの選手より「自分の級別」が上なら、強烈にアタマ評価を加算！
         if waku > 1 and rank_val > in_rank_val:
-            scenario_pt += 25  # 格上の差し・まくり加点
-            
-            # さらに2枠が格上の場合は大チャンスなのでボーナス
+            scenario_pt += 25  
             if waku == 2:
                 scenario_pt += 10
+                
+        # 2. 強風補正（風速4m以上でイン受難、ダッシュ有利）
+        wind_pt = 0
+        if wind >= 4.0:
+            if waku in [1, 2]:
+                wind_pt -= 10
+            elif waku == 4:
+                wind_pt += 15  # 荒れ水面はカドが圧倒的有利
+            elif waku in [3, 5, 6]:
+                wind_pt += 5
+                
+        # 3. カドまくりボーナス（3枠が壁にならない場合）
+        kado_pt = 0
+        if waku == 4 and rank_val > course_3_rank_val:
+            kado_pt += 20 # 3枠が格下ならカドまくり大チャンス！
             
-        total_score = max(1.0, ai_pt + rank_pt + motor_pt + skill_pt + course_pt + scenario_pt)
+        # 4. 展示タイム補正（0.1秒早ければ+15点、遅ければマイナス）
+        tenji_pt = 0
+        if tenji > 0 and avg_tenji > 0:
+            diff = avg_tenji - tenji # プラスなら平均より早い
+            tenji_pt = diff * 150 # 0.01秒につき1.5点
+            
+        total_score = max(1.0, ai_pt + rank_pt + motor_pt + skill_pt + course_pt + scenario_pt + wind_pt + kado_pt + tenji_pt)
         adjusted_scores[i] = total_score
         
-        score_details[waku] = f"総得点 {total_score:>4.1f}点 (AI:{ai_pt:.1f}/級別:{rank_pt}/M:{motor_pt:.1f}/技:{skill_pt:.1f}/展開:{scenario_pt})"
+        score_details[waku] = f"総得点 {total_score:>4.1f}点 (AI:{ai_pt:.1f}/級:{rank_pt}/M:{motor_pt:.1f}/技:{skill_pt:.1f}/展開:{scenario_pt}/風:{wind_pt}/カド:{kado_pt}/展:{tenji_pt:.1f})"
         
     sum_scores = np.sum(adjusted_scores)
     
