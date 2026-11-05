@@ -14,8 +14,8 @@ st.set_page_config(page_title="ボートレースAI【決まり手完全連動�
 # 1. AIと各種辞書の読み込み
 @st.cache_resource
 def load_brain():
-    # 読み込みはすでに成功しているはずなので、ファイル名はこのままか、
-    # もしGitHub上で「boat_ai_brain_v9 .pkl」(スペースあり)にしている場合は直してな！
+    # ※GitHub上でスペースが入っている場合は 'boat_ai_brain_v9 .pkl'
+    # もしスペースを消してリネームした場合は 'boat_ai_brain_v9.pkl' にしてな！
     with open('boat_ai_brain_v9 .pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return (
@@ -36,7 +36,7 @@ VENUE_MAP = {
     "下関": "19", "若松": "20", "芦屋": "21", "福岡": "22", "唐津": "23", "大村": "24"
 }
 
-# 2. スクレイピング関数（今節の調子・ST・展示を網羅）
+# 2. スクレイピング関数
 def scrape_boatrace_data_v9(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
@@ -114,7 +114,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
     except Exception as e:
         return None, None, False, f"読み込み失敗: {str(e)}"
 
-# 3. 予想実行関数（★「決まり手（得意技）」とコース・級別のシナリオを完全連動）
+# 3. 予想実行関数
 def predict_race_auto_v9(target_date, venue, race_num):
     boat_data, env_data, success, msg = scrape_boatrace_data_v9(target_date, venue, race_num)
     if not success: return msg
@@ -137,20 +137,37 @@ def predict_race_auto_v9(target_date, venue, race_num):
         input_dict[f'{w}枠_M2連対'] = m_stats.get('m_rate_2ren', 0.0)
         input_dict[f'{w}枠_M3連対'] = m_stats.get('m_rate_3ren', 0.0)
 
-    # ---------------------------------------------------------
-    # 🚨 【修正ポイント】LightGBMの型エラー（categorical_feature do not match）を防ぐ処理
-    # ---------------------------------------------------------
     X_pred = pd.DataFrame([input_dict], columns=train_features)
     
+    # 🚨【究極の解決策】AIの脳内から「学習時のカテゴリー構造」を直接取り出して完全に同期させる
+    booster = getattr(model_1st, 'booster_', getattr(model_1st, '_Booster', None))
+    if booster and hasattr(booster, 'pandas_categorical') and booster.pandas_categorical:
+        for item in booster.pandas_categorical:
+            # LightGBM内部の [col_name, original_type, categories] 構造を取り出す
+            if isinstance(item, (list, tuple)) and len(item) >= 3:
+                col_name, cats = item[0], item[2]
+            elif isinstance(item, dict):
+                col_name = item.get('col_name') or item.get('name')
+                cats = item.get('categories') or item.get('cats')
+            else:
+                continue
+                
+            if col_name and col_name in X_pred.columns:
+                # AIが覚えているカテゴリーの型に合わせる
+                if len(cats) > 0:
+                    if isinstance(cats[0], int):
+                        X_pred[col_name] = pd.to_numeric(X_pred[col_name], errors='coerce')
+                    elif isinstance(cats[0], str):
+                        X_pred[col_name] = X_pred[col_name].astype(str)
+                # 学習時のカテゴリー辞書をそのまま適用
+                X_pred[col_name] = pd.Categorical(X_pred[col_name], categories=cats)
+
+    # それ以外の普通の数値データもキレイに整える
     for col in X_pred.columns:
-        if col == '会場' or '登番' in col:
-            # 整数型または文字列型として安全に処理し、カテゴリ型へキャスト
-            X_pred[col] = X_pred[col].astype(str).astype('category')
-        else:
-            # 数値特徴量はすべて float に統一してエラーを回避
+        if str(X_pred[col].dtype) == 'object':
             X_pred[col] = pd.to_numeric(X_pred[col], errors='coerce').fillna(0.0)
 
-    # 予測を実行（型エラーを回避した状態）
+    # いざ予測！
     preds_1st = model_1st.predict_proba(X_pred)[0]
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
@@ -161,14 +178,10 @@ def predict_race_auto_v9(target_date, venue, race_num):
         waku = i + 1
         rank = boat_data[waku]['級別']
         rhythm = boat_data[waku]['今節調子スコア']
-        c_1st_rate = input_dict[f'{waku}枠_1着率'] # そのコースでの1着実績
+        c_1st_rate = input_dict[f'{waku}枠_1着率'] 
         
-        # 級別ベースの優劣
         r_weight = 1.3 if rank == "A1" else (1.1 if rank == "A2" else (1.0 if rank == "B1" else 0.7))
-        
-        # 枠番ごとの「得意技シナリオ」補正
         technique_bonus = 1.0 + (c_1st_rate * 2.5)
-        
         waku_base = 1.4 if waku == 1 else (1.1 if waku == 2 else (1.0 if waku == 3 else (0.9 if waku == 4 else 0.7)))
         
         adjusted_1st[i] = preds_1st[i] * r_weight * waku_base * technique_bonus * rhythm
@@ -213,7 +226,7 @@ today_str = datetime.datetime.now().strftime('%Y%m%d')
 
 col1, col2, col3 = st.columns(3)
 with col1:
-    target_date = st.text_input("日付 (例: 20261103)", value=today_str)
+    target_date = st.text_input("日付 (例: 20261105)", value=today_str)
 with col2:
     venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=9)
 with col3:
