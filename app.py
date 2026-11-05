@@ -14,7 +14,6 @@ st.set_page_config(page_title="ボートレースAI【決まり手完全連動�
 # 1. AIと各種辞書の読み込み
 @st.cache_resource
 def load_brain():
-    # GitHub上のファイル名に合わせています
     with open('boat_ai_brain_v9 .pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return (
@@ -126,18 +125,47 @@ def predict_race_auto_v9(target_date, venue, race_num):
         input_dict[f'{w}枠登番'] = toban
         input_dict[f'{w}枠展示'] = boat_data[w]['展示']
         
-        # 【完全修正】文字でも数字でも、確実に選手データを引き出す
-        c_stats = racer_stat_dict.get((int(toban), w), racer_stat_dict.get((str(toban), w), {}))
+        # 【執念のデータ引き出しロジック】型のズレや構造の違いを突破する
+        c_stats = racer_stat_dict.get((int(toban), int(w)), racer_stat_dict.get((str(toban), int(w)), {}))
+        if not c_stats:
+            c_stats = racer_stat_dict.get(int(toban), racer_stat_dict.get(str(toban), {}))
+            
+        rate_1st, rate_2ren, rate_3ren, avg_st = 0.0, 0.0, 0.0, 0.17
         
-        input_dict[f'{w}枠_1着率'] = c_stats.get('rate_1st', 0.0)
-        input_dict[f'{w}枠_2連対率'] = c_stats.get('rate_2ren', 0.0)
-        input_dict[f'{w}枠_3連対率'] = c_stats.get('rate_3ren', 0.0)
-        input_dict[f'{w}枠_平均ST'] = c_stats.get('avg_st', 0.17)
+        # 日本語でも英語でも、1着率っぽいデータを総当たりで引っこ抜く！
+        for k, v in c_stats.items():
+            ks = str(k)
+            # 1着率の検索
+            if '1着' in ks or '1st' in ks:
+                if str(w) in ks or ks in ['1着率', 'rate_1st']:
+                    rate_1st = float(v)
+            # 2連対率の検索
+            if '2連' in ks or '2ren' in ks:
+                if str(w) in ks or ks in ['2連対率', 'rate_2ren']:
+                    rate_2ren = float(v)
+            # 3連対率の検索
+            if '3連' in ks or '3ren' in ks:
+                if str(w) in ks or ks in ['3連対率', 'rate_3ren']:
+                    rate_3ren = float(v)
+            # STの検索
+            if 'ST' in ks.upper():
+                if str(w) in ks or ks in ['平均ST', 'avg_st']:
+                    avg_st = float(v)
+
+        # 万が一％表記（例：35.0）で保存されていた場合は、小数（0.35）に修正
+        if rate_1st > 1.0: rate_1st /= 100.0
+        if rate_2ren > 1.0: rate_2ren /= 100.0
+        if rate_3ren > 1.0: rate_3ren /= 100.0
+
+        input_dict[f'{w}枠_1着率'] = rate_1st
+        input_dict[f'{w}枠_2連対率'] = rate_2ren
+        input_dict[f'{w}枠_3連対率'] = rate_3ren
+        input_dict[f'{w}枠_平均ST'] = avg_st
         
         # モーターデータも同様に安全に引き出す
         m_stats = motor_stat_dict.get((int(env_data['会場']), int(motor)), motor_stat_dict.get((str(env_data['会場']), str(motor)), {}))
-        input_dict[f'{w}枠_M2連対'] = m_stats.get('m_rate_2ren', 0.0)
-        input_dict[f'{w}枠_M3連対'] = m_stats.get('m_rate_3ren', 0.0)
+        input_dict[f'{w}枠_M2連対'] = m_stats.get('m_rate_2ren', m_stats.get('2連対率', 0.0))
+        input_dict[f'{w}枠_M3連対'] = m_stats.get('m_rate_3ren', m_stats.get('3連対率', 0.0))
 
     X_pred = pd.DataFrame([input_dict], columns=train_features)
     
@@ -202,9 +230,9 @@ def predict_race_auto_v9(target_date, venue, race_num):
     
     for i in range(1, 7):
         r = boat_data[i]['級別']
-        st = input_dict[f'{i}枠_平均ST']
+        st_val = input_dict[f'{i}枠_平均ST']
         c_1st = input_dict[f'{i}枠_1着率'] * 100
-        result_text += f"{i}枠({r}): 当該コース1着実績(得意技) {c_1st:.1f}% / ST:{st:.2f}\n"
+        result_text += f"{i}枠({r}): 当該コース1着実績(得意技) {c_1st:.1f}% / ST:{st_val:.2f}\n"
         
     prob_sorted = sorted(final_probs, key=lambda x: x[1], reverse=True)
     
@@ -235,3 +263,11 @@ if st.button("⚡ 得意技を反映して予想！", type="primary"):
     with st.spinner("選手の決まり手実績・コース適性を分析中..."):
         res = predict_race_auto_v9(target_date, venue, race_num)
         st.text_area("AIの進化解析結果", value=res, height=450)
+
+# デバッグ用：もしこれでも0.0%になる場合は、ここをチェックして辞書の中身を見てみてな！
+if st.checkbox("🔧 【デバッグ】AI脳内の選手データ構造を確認する"):
+    if racer_stat_dict:
+        sample_key, sample_val = list(racer_stat_dict.items())[0]
+        st.info(f"保存されているキーの形: {sample_key}\n\n保存されているデータの中身: {sample_val}")
+    else:
+        st.error("選手データの辞書（racer_stat_dict）が空っぽや！")
