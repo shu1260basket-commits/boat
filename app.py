@@ -9,7 +9,7 @@ import re
 import itertools
 
 # ページの基本設定
-st.set_page_config(page_title="ボートレースAI【決まり手完全連動・進化版】", layout="centered")
+st.set_page_config(page_title="ボートレースAI【スコアリング完全進化版】", layout="centered")
 
 # 1. AIと各種辞書の読み込み
 @st.cache_resource
@@ -174,9 +174,8 @@ def predict_race_auto_v9(target_date, venue, race_num):
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
     
-    # 🔥【超進化ポイント：プロ舟券師の「点数（スコアリング）方式」を導入】
     course_multipliers = {1: 2.5, 2: 1.5, 3: 1.0, 4: 0.8, 5: 0.4, 6: 0.1}
-    adjusted_1st = np.zeros(6)
+    adjusted_scores = np.zeros(6)
     score_details = {}
     
     in_rank = boat_data[1]['級別']
@@ -185,45 +184,47 @@ def predict_race_auto_v9(target_date, venue, race_num):
         waku = i + 1
         rank = boat_data[waku]['級別']
         
-        # ① AI基本スコア (LightGBMの確率を最大50点に換算)
         ai_pt = preds_1st[i] * 50.0
-        
-        # ② 級別スコア (A1に圧倒的な加点)
         rank_pt = {"A1": 25, "A2": 15, "B1": 5, "B2": 0}.get(rank, 5)
         
-        # ③ モータースコア (2連対率40%なら16点、20%なら8点)
         motor_2ren = input_dict[f'{waku}枠_M2連対'] * 100
         motor_pt = motor_2ren * 0.4
         
-        # ④ コース・得意技スコア (コース別1着率を点数化)
         c_1st_rate = input_dict[f'{waku}枠_1着率'] * course_multipliers[waku]
         skill_pt = c_1st_rate * 100.0
         
-        # ⑤ 枠番基本スコア (単純な有利不利)
         course_pt = {1: 20, 2: 10, 3: 5, 4: 5, 5: 0, 6: -5}[waku]
         
-        # ⑥ 展開スコア (プロのセオリー：イン飛び・まくり加点)
         scenario_pt = 0
         if waku == 1 and in_rank in ["B1", "B2"]:
-            scenario_pt -= 25 # インがB級なら大幅減点(イン飛び)
+            scenario_pt -= 25 
         elif waku in [2, 3, 4] and rank in ["A1", "A2"] and in_rank in ["B1", "B2"]:
-            scenario_pt += 20 # B級インを狙うA級の差し・まくりに加点
+            scenario_pt += 20 
             
-        # 全スコアを合計 (最低でも1点は残す)
         total_score = max(1.0, ai_pt + rank_pt + motor_pt + skill_pt + course_pt + scenario_pt)
-        adjusted_1st[i] = total_score
+        adjusted_scores[i] = total_score
         
-        # 画面表示用に内訳を保存
         score_details[waku] = f"総得点 {total_score:>4.1f}点 (AI:{ai_pt:.1f}/級別:{rank_pt}/M:{motor_pt:.1f}/技:{skill_pt:.1f}/展開:{scenario_pt})"
         
-    # 合計スコアの比率を新しい1着確率に変換
-    preds_1st = adjusted_1st / np.sum(adjusted_1st)
+    # 🚨【修正ポイント】: 算出した総合スコアを、1着・2着・3着すべての確率ベースとして強力に反映させる！
+    score_probs = adjusted_scores / np.sum(adjusted_scores)
+    
+    # 1着はスコアの評価を100%信用する
+    final_1st_probs = score_probs
+    
+    # 2着・3着は「AIの予測」と「スコア評価」をミックスして、スコア上位の選手が消えないようにする
+    final_2nd_probs = (preds_2nd * 0.3) + (score_probs * 0.7)
+    final_2nd_probs /= np.sum(final_2nd_probs)
+    
+    final_3rd_probs = (preds_3rd * 0.3) + (score_probs * 0.7)
+    final_3rd_probs /= np.sum(final_3rd_probs)
 
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
     for (r1, r2, r3) in combos:
         if r1 == r2 or r2 == r3 or r1 == r3: continue
-        p = preds_1st[r1] * preds_2nd[r2] * preds_3rd[r3]
+        # 修正した確率を使って3連単の確率を計算
+        p = final_1st_probs[r1] * final_2nd_probs[r2] * final_3rd_probs[r3]
         raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", p))
         
     total_p = sum(x[1] for x in raw_probs)
