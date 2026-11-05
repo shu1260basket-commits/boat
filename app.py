@@ -14,8 +14,7 @@ st.set_page_config(page_title="ボートレースAI【決まり手完全連動�
 # 1. AIと各種辞書の読み込み
 @st.cache_resource
 def load_brain():
-    # ※GitHub上でスペースが入っている場合は 'boat_ai_brain_v9 .pkl'
-    # もしスペースを消してリネームした場合は 'boat_ai_brain_v9.pkl' にしてな！
+    # GitHub上のファイル名に合わせています
     with open('boat_ai_brain_v9 .pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return (
@@ -127,23 +126,25 @@ def predict_race_auto_v9(target_date, venue, race_num):
         input_dict[f'{w}枠登番'] = toban
         input_dict[f'{w}枠展示'] = boat_data[w]['展示']
         
-        c_stats = racer_stat_dict.get((toban, w), {})
+        # 【完全修正】文字でも数字でも、確実に選手データを引き出す
+        c_stats = racer_stat_dict.get((int(toban), w), racer_stat_dict.get((str(toban), w), {}))
+        
         input_dict[f'{w}枠_1着率'] = c_stats.get('rate_1st', 0.0)
         input_dict[f'{w}枠_2連対率'] = c_stats.get('rate_2ren', 0.0)
         input_dict[f'{w}枠_3連対率'] = c_stats.get('rate_3ren', 0.0)
         input_dict[f'{w}枠_平均ST'] = c_stats.get('avg_st', 0.17)
         
-        m_stats = motor_stat_dict.get((env_data['会場'], motor), {})
+        # モーターデータも同様に安全に引き出す
+        m_stats = motor_stat_dict.get((int(env_data['会場']), int(motor)), motor_stat_dict.get((str(env_data['会場']), str(motor)), {}))
         input_dict[f'{w}枠_M2連対'] = m_stats.get('m_rate_2ren', 0.0)
         input_dict[f'{w}枠_M3連対'] = m_stats.get('m_rate_3ren', 0.0)
 
     X_pred = pd.DataFrame([input_dict], columns=train_features)
     
-    # 🚨【究極の解決策】AIの脳内から「学習時のカテゴリー構造」を直接取り出して完全に同期させる
+    # AIの脳内から「学習時のカテゴリー構造」を直接取り出して完全に同期させる（型エラー防止）
     booster = getattr(model_1st, 'booster_', getattr(model_1st, '_Booster', None))
     if booster and hasattr(booster, 'pandas_categorical') and booster.pandas_categorical:
         for item in booster.pandas_categorical:
-            # LightGBM内部の [col_name, original_type, categories] 構造を取り出す
             if isinstance(item, (list, tuple)) and len(item) >= 3:
                 col_name, cats = item[0], item[2]
             elif isinstance(item, dict):
@@ -153,13 +154,11 @@ def predict_race_auto_v9(target_date, venue, race_num):
                 continue
                 
             if col_name and col_name in X_pred.columns:
-                # AIが覚えているカテゴリーの型に合わせる
                 if len(cats) > 0:
                     if isinstance(cats[0], int):
                         X_pred[col_name] = pd.to_numeric(X_pred[col_name], errors='coerce')
                     elif isinstance(cats[0], str):
                         X_pred[col_name] = X_pred[col_name].astype(str)
-                # 学習時のカテゴリー辞書をそのまま適用
                 X_pred[col_name] = pd.Categorical(X_pred[col_name], categories=cats)
 
     # それ以外の普通の数値データもキレイに整える
@@ -167,7 +166,7 @@ def predict_race_auto_v9(target_date, venue, race_num):
         if str(X_pred[col].dtype) == 'object':
             X_pred[col] = pd.to_numeric(X_pred[col], errors='coerce').fillna(0.0)
 
-    # いざ予測！
+    # 予測を実行
     preds_1st = model_1st.predict_proba(X_pred)[0]
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
