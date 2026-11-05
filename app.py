@@ -34,6 +34,12 @@ VENUE_MAP = {
     "下関": "19", "若松": "20", "芦屋": "21", "福岡": "22", "唐津": "23", "大村": "24"
 }
 
+# 会場ごとの「1コース有利不利」ボーナス
+VENUE_1ST_BONUS = {
+    "大村": 15, "芦屋": 10, "徳山": 10, "下関": 5, "住之江": 5,
+    "戸田": -15, "江戸川": -10, "平和島": -10, "鳴門": -5
+}
+
 # 2. スクレイピング関数
 def scrape_boatrace_data_v9(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
@@ -140,13 +146,11 @@ def predict_race_auto_v9(target_date, venue, race_num):
         input_dict[f'{w}枠_3連対率'] = rate_3ren
         input_dict[f'{w}枠_平均ST'] = avg_st
         
-        # モーター辞書の完全総当たり検索
         m_stats = motor_stat_dict.get((int(env_data['会場']), int(motor)), {})
         if not m_stats:
             m_stats = motor_stat_dict.get(int(motor), motor_stat_dict.get(str(motor), {}))
             
-        m_2ren = 0.0
-        m_3ren = 0.0
+        m_2ren, m_3ren = 0.0, 0.0
         for k, v in m_stats.items():
             ks = str(k)
             if '2連' in ks or '2ren' in ks: m_2ren = float(v)
@@ -194,8 +198,14 @@ def predict_race_auto_v9(target_date, venue, race_num):
     in_rank_val = rank_score_map.get(in_rank, 2)
     course_3_rank_val = rank_score_map.get(boat_data[3]['級別'], 2)
     wind = env_data['風速']
+    v_bonus = VENUE_1ST_BONUS.get(venue, 0)
     
-    # 展示タイムの平均を計算（直前気配の偏差を出すため）
+    # 展開予想のための平均STデータ
+    st_123_avg = (input_dict['1枠_平均ST'] + input_dict['2枠_平均ST'] + input_dict['3枠_平均ST']) / 3.0
+    st_4 = input_dict['4枠_平均ST']
+    st_5 = input_dict['5枠_平均ST']
+    
+    # 展示タイムの平均
     tenji_times = [boat_data[w]['展示'] for w in range(1, 7) if boat_data[w]['展示'] > 0]
     avg_tenji = sum(tenji_times) / len(tenji_times) if tenji_times else 0
     
@@ -205,51 +215,56 @@ def predict_race_auto_v9(target_date, venue, race_num):
         rank_val = rank_score_map.get(rank, 2)
         tenji = boat_data[waku]['展示']
         
+        # --- ① 基礎スコア ---
         ai_pt = preds_1st[i] * 50.0
         rank_pt = {"A1": 25, "A2": 15, "B1": 5, "B2": 0}.get(rank, 5)
+        motor_pt = input_dict[f'{waku}枠_M2連対'] * 100 * 0.4
+        skill_pt = input_dict[f'{waku}枠_1着率'] * course_multipliers[waku] * 100.0
         
-        motor_2ren = input_dict[f'{waku}枠_M2連対'] * 100
-        motor_pt = motor_2ren * 0.4
-        
-        c_1st_rate = input_dict[f'{waku}枠_1着率'] * course_multipliers[waku]
-        skill_pt = c_1st_rate * 100.0
-        
+        # --- ② 枠と会場の有利不利 ---
         course_pt = {1: 20, 2: 10, 3: 5, 4: 5, 5: 0, 6: -5}[waku]
-        
-        # 1. 基本の展開スコア（イン飛び＆格上キラー）
+        if waku == 1:
+            course_pt += v_bonus # 戸田なら大減点、大村なら大加点
+            
+        # --- ③ 展開・ST予想スコア ---
         scenario_pt = 0
         if waku == 1 and in_rank_val <= 2:
-            scenario_pt -= 25 
+            scenario_pt -= 25 # イン飛び
         if waku > 1 and rank_val > in_rank_val:
-            scenario_pt += 25  
-            if waku == 2:
-                scenario_pt += 10
-                
-        # 2. 強風補正（風速4m以上でイン受難、ダッシュ有利）
-        wind_pt = 0
-        if wind >= 4.0:
-            if waku in [1, 2]:
-                wind_pt -= 10
-            elif waku == 4:
-                wind_pt += 15  # 荒れ水面はカドが圧倒的有利
-            elif waku in [3, 5, 6]:
-                wind_pt += 5
-                
-        # 3. カドまくりボーナス（3枠が壁にならない場合）
-        kado_pt = 0
+            scenario_pt += 25 # インより格上で叩き潰し
+            if waku == 2: scenario_pt += 10
+            
         if waku == 4 and rank_val > course_3_rank_val:
-            kado_pt += 20 # 3枠が格下ならカドまくり大チャンス！
+            scenario_pt += 15 # 3枠が格下でカドまくり
             
-        # 4. 展示タイム補正（0.1秒早ければ+15点、遅ければマイナス）
-        tenji_pt = 0
+        # 🔥【NEW】STの差による展開ボーナス
+        if waku == 4 and st_4 < (st_123_avg - 0.02):
+            scenario_pt += 20 # 4枠が内側より1艇身以上早い（カド一撃）
+        elif waku == 5 and st_5 < (st_4 - 0.02):
+            scenario_pt += 15 # 5コース出し抜けまくり差し
+        elif waku == 1 and input_dict['1枠_平均ST'] > 0.18:
+            scenario_pt -= 15 # インのドカ遅れ不安
+            
+        # 風速補正
+        if wind >= 4.0:
+            if waku in [1, 2]: scenario_pt -= 10
+            elif waku == 4: scenario_pt += 15
+            elif waku in [3, 5, 6]: scenario_pt += 5
+            
+        # --- ④ 直前気配（展示・調子）スコア ---
+        kehai_pt = 0
         if tenji > 0 and avg_tenji > 0:
-            diff = avg_tenji - tenji # プラスなら平均より早い
-            tenji_pt = diff * 150 # 0.01秒につき1.5点
+            kehai_pt += (avg_tenji - tenji) * 150 # 0.01秒につき1.5点
             
-        total_score = max(1.0, ai_pt + rank_pt + motor_pt + skill_pt + course_pt + scenario_pt + wind_pt + kado_pt + tenji_pt)
+        rhythm_score = boat_data[waku]['今節調子スコア'] # 0.5〜2.5
+        kehai_pt += (rhythm_score - 1.25) * 10 # 今節ピンピンなら+12.5点、大敗続きなら-7.5点
+            
+        # 総合計
+        total_score = max(1.0, ai_pt + rank_pt + motor_pt + skill_pt + course_pt + scenario_pt + kehai_pt)
         adjusted_scores[i] = total_score
         
-        score_details[waku] = f"総得点 {total_score:>4.1f}点 (AI:{ai_pt:.1f}/級:{rank_pt}/M:{motor_pt:.1f}/技:{skill_pt:.1f}/展開:{scenario_pt}/風:{wind_pt}/カド:{kado_pt}/展:{tenji_pt:.1f})"
+        # 内訳の表示をスッキリまとめる
+        score_details[waku] = f"総点 {total_score:>4.1f} (AI:{ai_pt:.1f}|級:{rank_pt}|機:{motor_pt:.1f}|技:{skill_pt:.1f}|枠地:{course_pt}|展開:{scenario_pt}|気配:{kehai_pt:.1f})"
         
     sum_scores = np.sum(adjusted_scores)
     
@@ -271,8 +286,8 @@ def predict_race_auto_v9(target_date, venue, race_num):
     total_p = sum(x[1] for x in raw_probs)
     final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
     
-    result_text = f"🌐 【決まり手完全連動・スコア進化版】解析完了！\n"
-    result_text += f"🌪️ 水面環境: 風速 {env_data['風速']}m / 波高 {env_data['波高']}cm\n\n"
+    result_text = f"🌐 【プロ舟券師ロジック完全搭載版】解析完了！\n"
+    result_text += f"🌪️ 水面環境: {venue} / 風速 {env_data['風速']}m / 波高 {env_data['波高']}cm\n\n"
     
     result_text += "📊 各艇の評価スコア内訳（AIベース＋実力・機力・展開）\n"
     for i in range(1, 7):
@@ -293,7 +308,7 @@ def predict_race_auto_v9(target_date, venue, race_num):
     return result_text
 
 # Streamlitの画面デザイン
-st.title("🚤 ボートレースAI【スコアリング完全進化版】")
+st.title("🚤 ボートレースAI【プロ舟券師ロジック完全搭載版】")
 
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
@@ -306,6 +321,6 @@ with col3:
     race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1)
 
 if st.button("⚡ スコアを反映して予想！", type="primary"):
-    with st.spinner("選手・モーター・展開をスコア化して分析中..."):
+    with st.spinner("プロの思考回路で展開と気配をスコア化して分析中..."):
         res = predict_race_auto_v9(target_date, venue, race_num)
         st.text_area("AIのスコア解析結果", value=res, height=550)
