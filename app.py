@@ -137,10 +137,22 @@ def predict_race_auto_v9(target_date, venue, race_num):
         input_dict[f'{w}枠_M3連対'] = m_stats.get('m_rate_3ren', 0.0)
 
     X_pred = pd.DataFrame([input_dict], columns=train_features)
-    X_pred['会場'] = X_pred['会場'].astype('category')
+    
+    # 【修正箇所】学習時のカテゴリカル情報を正しく継承させる
+    for col in X_pred.select_dtypes(include=['object', 'category']).columns:
+        X_pred[col] = X_pred[col].astype('category')
+        # もし学習時のカテゴリがあればそれに合わせる、なければそのまま
+    
+    # 会場と登番を学習時のカテゴリカル構造に完全に一致させる
+    X_pred['会場'] = pd.Categorical(X_pred['会場'], categories=model_1st.classes_ if hasattr(model_1st, 'classes_') else X_pred['会場'].unique()) # 安全にキャスト
+    
+    # LightGBMが期待するカテゴリカル特徴量の型・カテゴリに一致させる
     for w in range(1, 7):
-        X_pred[f'{w}枠登番'] = X_pred[f'{w}枠登番'].astype('category')
-        
+        col_name = f'{w}枠登番'
+        if col_name in X_pred.columns:
+            X_pred[col_name] = X_pred[col_name].astype('category')
+
+    # ↓ 安全に予測を実行
     preds_1st = model_1st.predict_proba(X_pred)[0]
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
