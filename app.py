@@ -400,26 +400,24 @@ with tab1:
             if "error" in res_dict:
                 st.error(res_dict["error"])
             else:
-                left_col, right_col = st.columns([1, 1.3])
-                with left_col:
-                    st.text_area("AIのスコア解析結果", value=res_dict["text"], height=450)
-                with right_col:
-                    # クモの巣化を防ぐため「項目別・グループ化棒グラフ」に変更
-                    # ダークモードでも2枠が消えないように 'black' を '#aaaaaa' (シルバー)に変更
-                    df_graph = res_dict["graph_data"]
-                    fig = px.bar(
-                        df_graph, x='項目', y='スコア', color='枠', 
-                        barmode='group', template="plotly_dark",
-                        text_auto='.0f', # 数値を棒の上に表示
-                        color_discrete_sequence=['#ffffff', '#aaaaaa', '#ff4444', '#44aaff', '#ffee00', '#44ff44']
-                    )
-                    fig.update_layout(
-                        title="📊 全艇パラメーター比較（項目別）",
-                        xaxis_title=None,
-                        yaxis_title="評価スコア",
-                        legend_title="枠番"
-                    )
-                    st.plotly_chart(fig, use_container_width=True)
+                # テキストエリアを上に配置
+                st.text_area("AIのスコア解析結果", value=res_dict["text"], height=400)
+                
+                # グラフをテキストの下に広々と配置
+                df_graph = res_dict["graph_data"]
+                fig = px.bar(
+                    df_graph, x='項目', y='スコア', color='枠', 
+                    barmode='group', template="plotly_dark",
+                    text_auto='.0f', # 数値を棒の上に表示
+                    color_discrete_sequence=['#ffffff', '#aaaaaa', '#ff4444', '#44aaff', '#ffee00', '#44ff44']
+                )
+                fig.update_layout(
+                    title="📊 全艇パラメーター比較（項目別）",
+                    xaxis_title=None,
+                    yaxis_title="評価スコア",
+                    legend_title="枠番"
+                )
+                st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
     st.write("1R〜12Rを一気にシミュレーションし、AI予想と「実際の結果・払戻金」を横並びで比較します。")
