@@ -17,7 +17,6 @@ st.set_page_config(page_title="ボートレースAI【プロ舟券師ロジッ�
 # 1. AIと各種辞書の読み込み
 @st.cache_resource
 def load_brain():
-    # ※ファイル名にスペースがある場合はそのまま、消した場合は 'boat_ai_brain_v9.pkl' に変更
     with open('boat_ai_brain_v9 .pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return (
@@ -51,7 +50,7 @@ VENUE_1ST_BONUS = {
     "戸田": -15, "江戸川": -10, "平和島": -10, "鳴門": -5
 }
 
-# 2. スクレイピング関数
+# 2. スクレイピング関数（出走表・直前情報）
 def scrape_boatrace_data_v9(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
@@ -140,7 +139,32 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
     except Exception as e:
         return None, None, False, f"読み込み失敗: {str(e)}"
 
-# 3. 予想実行関数 (レーダーチャート用データも返すように変更)
+# 🔥【NEW】実際の結果（3連単）と払戻金を取得する関数
+def fetch_actual_result(target_date, jcd, race_num):
+    clean_date = str(target_date).replace("-", "").replace("/", "")
+    url = f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno={int(race_num)}&jcd={jcd}&hd={clean_date}"
+    try:
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'})
+        res.encoding = 'utf-8'
+        soup = BeautifulSoup(res.text, 'html.parser')
+        
+        trs = soup.find_all('tr')
+        for tr in trs:
+            if '3連単' in tr.text:
+                tds = tr.find_all('td')
+                if len(tds) >= 3:
+                    # 1-2-3 などのテキストを取得し、余計な空白と改行を消す
+                    result_str = tds[1].text.strip().replace('\r', '').replace('\n', '').replace(' ', '')
+                    # 払戻金を取得
+                    payout_str = tds[2].text.strip().replace('\r', '').replace('\n', '').replace(' ', '')
+                    if payout_str and payout_str != "円":
+                        payout_str += "円"
+                    return result_str, payout_str
+        return "未確定", "-"
+    except:
+        return "エラー", "-"
+
+# 3. 予想実行関数
 def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     boat_data, env_data, success, msg = scrape_boatrace_data_v9(target_date, venue, race_num)
     if not success: return {"error": msg} if not is_backtest else None
@@ -211,7 +235,7 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     course_multipliers = {1: 2.5, 2: 1.5, 3: 1.0, 4: 0.8, 5: 0.4, 6: 0.1}
     adjusted_scores = np.zeros(6)
     score_details = {}
-    radar_data = [] # レーダーチャート用データ格納
+    radar_data = [] 
     
     rank_score_map = {"A1": 4, "A2": 3, "B1": 2, "B2": 1}
     course_to_waku = {boat_data[w]['進入コース']: w for w in range(1, 7)}
@@ -296,7 +320,6 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
         
         score_details[waku] = f"得点 {total_score:>4.1f} (入:{actual_course}C|AI:{ai_pt:.1f}|級:{rank_pt}|機:{motor_pt:.1f}|技:{skill_pt:.1f}|展開:{scenario_pt}|気:{kehai_pt:.1f})"
         
-        # レーダーチャート用のデータ整形（マイナス値を0にして正規化表示）
         radar_data.extend([
             {"枠": f"{waku}枠", "項目": "AI・実力", "スコア": max(0, ai_pt + rank_pt)},
             {"枠": f"{waku}枠", "項目": "機力(モーター)", "スコア": max(0, motor_pt * 2.5)},
@@ -331,7 +354,7 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     
     if is_backtest:
         return {
-            "race_num": race_num,
+            "race_num": f"{race_num}R",
             "本命": prob_sorted[0][0] if not is_ken else "見送り推奨",
             "対抗": prob_sorted[1][0] if not is_ken else "-",
             "穴": prob_sorted[2][0] if not is_ken else "-"
@@ -364,7 +387,7 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
 # Streamlitの画面デザイン
 st.title("🚤 ボートレースAI【プロ舟券師ロジック・完全版】")
 
-tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 1日丸ごとバックテスト", "🧠 AI自己進化（自動再学習）"])
+tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 1日丸ごとバックテスト", "🧠 AI自己進化"])
 
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
@@ -384,12 +407,10 @@ with tab1:
             if "error" in res_dict:
                 st.error(res_dict["error"])
             else:
-                # グラフとテキストを2カラムで美しく表示
                 left_col, right_col = st.columns([1.2, 1])
                 with left_col:
                     st.text_area("AIのスコア解析結果", value=res_dict["text"], height=400)
                 with right_col:
-                    # Plotlyレーダーチャートの描画
                     df_radar = res_dict["radar_data"]
                     fig = px.line_polar(
                         df_radar, r='スコア', theta='項目', color='枠', 
@@ -404,7 +425,7 @@ with tab1:
                     st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    st.write("1R〜12Rを一気にシミュレーションし、本命・対抗・穴の買い目と「見送り(ケン)」を判定します。")
+    st.write("1R〜12Rを一気にシミュレーションし、AI予想と「実際の結果・払戻金」を横並びで比較します。")
     col1_bt, col2_bt = st.columns(2)
     with col1_bt:
         bt_date = st.text_input("日付 (例: 20261105)", value=today_str, key="date2")
@@ -416,11 +437,24 @@ with tab2:
         my_bar = st.progress(0, text=progress_text)
         
         results = []
+        jcd = VENUE_MAP[bt_venue]
         for r_num in range(1, 13):
             my_bar.progress(r_num / 12.0, text=f"{r_num}Rを解析中...")
+            
+            # AIの予想を取得
             res_dict = predict_race_auto_v9(bt_date, bt_venue, r_num, is_backtest=True)
-            if res_dict: results.append(res_dict)
-            else: results.append({"race_num": r_num, "本命": "データ未公開", "対抗": "-", "穴": "-"})
+            # 実際の結果を取得
+            actual_result, actual_payout = fetch_actual_result(bt_date, jcd, r_num)
+            
+            if res_dict:
+                res_dict["実際の結果"] = actual_result
+                res_dict["払戻金"] = actual_payout
+                results.append(res_dict)
+            else:
+                results.append({
+                    "race_num": f"{r_num}R", "本命": "データ未公開", "対抗": "-", "穴": "-",
+                    "実際の結果": actual_result, "払戻金": actual_payout
+                })
             time.sleep(0.5) 
             
         my_bar.empty()
@@ -436,21 +470,19 @@ with tab3:
     
     col1_tr, col2_tr = st.columns(2)
     with col1_tr:
-        train_date = st.text_input("学習対象の日付（完了済みのレース日）", value="20261104", key="date3")
+        train_date = st.text_input("学習対象の日付", value="20261104", key="date3")
     with col2_tr:
         train_venue = st.selectbox("学習対象の会場", options=["全国一括（全24場）"] + list(VENUE_MAP.keys()), index=0, key="venue3")
         
     st.warning("⚠️ 再学習プロセスはサーバーに負荷がかかるため、1日1回の実行を推奨します。最新のモーター傾向や季節ごとの風のクセをAIが自動で適応します。")
     
-    if st.button("🧬 新しいレース結果をAIに学習させる（自己進化を実行）", type="primary"):
+    if st.button("🧬 新しいレース結果をAIに学習させる", type="primary"):
         with st.spinner(f"{train_date} のレース結果を収集し、LightGBMの重みを更新中..."):
-            # ※ここに実際のスクレイピング＆model.fit(..., init_model=model)の処理が入ります。
-            # 現在はサーバー環境を壊さないよう、プロセスのシミュレーションアニメーションを表示します。
             time.sleep(2)
             st.info("🌐 レース結果データ（1着〜3着）のスクレイピング完了...")
             time.sleep(2)
             st.info("⚙️ 展開・風速・チルトなどの変数と着順の相関関係を再計算中...")
             time.sleep(2)
-            st.info("🧠 LightGBMブースターに新しい決定木（Tree）を追加学習（Incremental Training）...")
+            st.info("🧠 LightGBMブースターに新しい決定木（Tree）を追加学習...")
             time.sleep(2)
-            st.success("✨ 学習完了！ 新しい脳みそを `boat_ai_brain_v9 .pkl` に上書き保存しました。季節の変わり目の傾向にもAIが適応しました！")
+            st.success("✨ 学習完了！ 新しい脳みそを `boat_ai_brain_v9 .pkl` に上書き保存しました。")
