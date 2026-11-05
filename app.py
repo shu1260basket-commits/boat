@@ -170,9 +170,8 @@ def predict_race_auto_v9(target_date, venue, race_num):
         if str(X_pred[col].dtype) == 'object':
             X_pred[col] = pd.to_numeric(X_pred[col], errors='coerce').fillna(0.0)
 
+    # 1着の生確率だけをAIから貰い、2着3着の確率（バグの元）は使わない！
     preds_1st = model_1st.predict_proba(X_pred)[0]
-    preds_2nd = model_2nd.predict_proba(X_pred)[0]
-    preds_3rd = model_3rd.predict_proba(X_pred)[0]
     
     course_multipliers = {1: 2.5, 2: 1.5, 3: 1.0, 4: 0.8, 5: 0.4, 6: 0.1}
     adjusted_scores = np.zeros(6)
@@ -206,25 +205,25 @@ def predict_race_auto_v9(target_date, venue, race_num):
         
         score_details[waku] = f"総得点 {total_score:>4.1f}点 (AI:{ai_pt:.1f}/級別:{rank_pt}/M:{motor_pt:.1f}/技:{skill_pt:.1f}/展開:{scenario_pt})"
         
-    # 🚨【修正ポイント】: 算出した総合スコアを、1着・2着・3着すべての確率ベースとして強力に反映させる！
-    score_probs = adjusted_scores / np.sum(adjusted_scores)
+    # 🚨【究極の解決策】スコアから直接「確率」を割り出すプロの計算方式を導入
+    sum_scores = np.sum(adjusted_scores)
     
-    # 1着はスコアの評価を100%信用する
-    final_1st_probs = score_probs
-    
-    # 2着・3着は「AIの予測」と「スコア評価」をミックスして、スコア上位の選手が消えないようにする
-    final_2nd_probs = (preds_2nd * 0.3) + (score_probs * 0.7)
-    final_2nd_probs /= np.sum(final_2nd_probs)
-    
-    final_3rd_probs = (preds_3rd * 0.3) + (score_probs * 0.7)
-    final_3rd_probs /= np.sum(final_3rd_probs)
-
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
+    
     for (r1, r2, r3) in combos:
-        if r1 == r2 or r2 == r3 or r1 == r3: continue
-        # 修正した確率を使って3連単の確率を計算
-        p = final_1st_probs[r1] * final_2nd_probs[r2] * final_3rd_probs[r3]
+        score1 = adjusted_scores[r1]
+        score2 = adjusted_scores[r2]
+        score3 = adjusted_scores[r3]
+        
+        # 1着の確率（全体のスコアから）
+        p1 = score1 / sum_scores
+        # 2着の確率（1着になった艇を除いた残りからの確率）
+        p2 = score2 / (sum_scores - score1)
+        # 3着の確率（1着・2着を除いた残りからの確率）
+        p3 = score3 / (sum_scores - score1 - score2)
+        
+        p = p1 * p2 * p3
         raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", p))
         
     total_p = sum(x[1] for x in raw_probs)
