@@ -174,40 +174,49 @@ def predict_race_auto_v9(target_date, venue, race_num):
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
     
-    # 🔥【進化ポイント：2枠アタマ（2アタマ）完全特化ロジックに修正】
+    # 🔥【超進化ポイント：プロ舟券師の「点数（スコアリング）方式」を導入】
     course_multipliers = {1: 2.5, 2: 1.5, 3: 1.0, 4: 0.8, 5: 0.4, 6: 0.1}
     adjusted_1st = np.zeros(6)
+    score_details = {}
     
     in_rank = boat_data[1]['級別']
     
     for i in range(6):
         waku = i + 1
         rank = boat_data[waku]['級別']
-        rhythm = boat_data[waku]['今節調子スコア']
         
+        # ① AI基本スコア (LightGBMの確率を最大50点に換算)
+        ai_pt = preds_1st[i] * 50.0
+        
+        # ② 級別スコア (A1に圧倒的な加点)
+        rank_pt = {"A1": 25, "A2": 15, "B1": 5, "B2": 0}.get(rank, 5)
+        
+        # ③ モータースコア (2連対率40%なら16点、20%なら8点)
+        motor_2ren = input_dict[f'{waku}枠_M2連対'] * 100
+        motor_pt = motor_2ren * 0.4
+        
+        # ④ コース・得意技スコア (コース別1着率を点数化)
         c_1st_rate = input_dict[f'{waku}枠_1着率'] * course_multipliers[waku]
+        skill_pt = c_1st_rate * 100.0
         
-        # 基本の階級重み（やりすぎない程度に）
-        r_weight = 2.0 if rank == "A1" else (1.5 if rank == "A2" else (1.0 if rank == "B1" else 0.7))
+        # ⑤ 枠番基本スコア (単純な有利不利)
+        course_pt = {1: 20, 2: 10, 3: 5, 4: 5, 5: 0, 6: -5}[waku]
         
-        # 🚨 プロのセオリー：1枠B級 × 2枠A級 の「2アタマ完全特化」！
+        # ⑥ 展開スコア (プロのセオリー：イン飛び・まくり加点)
+        scenario_pt = 0
         if waku == 1 and in_rank in ["B1", "B2"]:
-            # 1枠がB級なら、イン逃げ確率をガッツリ削る
-            r_weight *= 0.4 
+            scenario_pt -= 25 # インがB級なら大幅減点(イン飛び)
+        elif waku in [2, 3, 4] and rank in ["A1", "A2"] and in_rank in ["B1", "B2"]:
+            scenario_pt += 20 # B級インを狙うA級の差し・まくりに加点
             
-        if waku == 2 and rank in ["A1", "A2"] and in_rank in ["B1", "B2"]:
-            # 2枠がA級なら、圧倒的なアタマ候補（差し・まくり）に格上げ！
-            r_weight *= 3.5 
-            
-        if waku >= 3 and rank in ["A1", "A2"] and in_rank in ["B1", "B2"]:
-            # 3枠以降の外のA級は「ヒモ（2着3着）」には来るが、過剰なアタマ評価はしない
-            r_weight *= 1.2 
-
-        technique_bonus = 1.0 + (c_1st_rate * 2.0)
-        waku_base = 1.4 if waku == 1 else (1.2 if waku == 2 else (1.0 if waku == 3 else (0.8 if waku == 4 else 0.6)))
+        # 全スコアを合計 (最低でも1点は残す)
+        total_score = max(1.0, ai_pt + rank_pt + motor_pt + skill_pt + course_pt + scenario_pt)
+        adjusted_1st[i] = total_score
         
-        adjusted_1st[i] = preds_1st[i] * r_weight * waku_base * technique_bonus * rhythm
+        # 画面表示用に内訳を保存
+        score_details[waku] = f"総得点 {total_score:>4.1f}点 (AI:{ai_pt:.1f}/級別:{rank_pt}/M:{motor_pt:.1f}/技:{skill_pt:.1f}/展開:{scenario_pt})"
         
+    # 合計スコアの比率を新しい1着確率に変換
     preds_1st = adjusted_1st / np.sum(adjusted_1st)
 
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
@@ -220,18 +229,18 @@ def predict_race_auto_v9(target_date, venue, race_num):
     total_p = sum(x[1] for x in raw_probs)
     final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
     
-    result_text = f"🌐 【決まり手完全連動・進化版】解析完了！\n"
+    result_text = f"🌐 【決まり手完全連動・スコア進化版】解析完了！\n"
     result_text += f"🌪️ 水面環境: 風速 {env_data['風速']}m / 波高 {env_data['波高']}cm\n\n"
     
+    result_text += "📊 各艇の評価スコア内訳（AIベース＋実力・機力・展開）\n"
     for i in range(1, 7):
         r = boat_data[i]['級別']
-        st_val = input_dict[f'{i}枠_平均ST']
-        c_1st = input_dict[f'{i}枠_1着率'] * course_multipliers[i] * 100
-        result_text += f"{i}枠({r}): 当該コース1着実績(得意技) {c_1st:.1f}% / ST:{st_val:.2f}\n"
+        detail = score_details[i]
+        result_text += f"{i}枠({r}): 【{detail}】\n"
         
     prob_sorted = sorted(final_probs, key=lambda x: x[1], reverse=True)
     
-    result_text += f"\n🎯 得意技・展開考慮の推奨買い目（上位6点）\n"
+    result_text += f"\n🎯 スコア・展開考慮の推奨買い目（上位6点）\n"
     result_text += "-" * 50 + "\n"
     for i, item in enumerate(prob_sorted[:6]):
         result_text += f"推奨 {i+1}点目: 【{item[0]}】 予想確率: {item[1]:>4.1f}%\n"
@@ -242,7 +251,7 @@ def predict_race_auto_v9(target_date, venue, race_num):
     return result_text
 
 # Streamlitの画面デザイン
-st.title("🚤 ボートレースAI【決まり手完全連動・進化版】")
+st.title("🚤 ボートレースAI【スコアリング完全進化版】")
 
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
@@ -254,7 +263,7 @@ with col2:
 with col3:
     race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1)
 
-if st.button("⚡ 得意技を反映して予想！", type="primary"):
-    with st.spinner("選手の決まり手実績・コース適性を分析中..."):
+if st.button("⚡ スコアを反映して予想！", type="primary"):
+    with st.spinner("選手・モーター・展開をスコア化して分析中..."):
         res = predict_race_auto_v9(target_date, venue, race_num)
-        st.text_area("AIの進化解析結果", value=res, height=450)
+        st.text_area("AIのスコア解析結果", value=res, height=550)
