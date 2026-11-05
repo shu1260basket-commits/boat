@@ -125,7 +125,6 @@ def predict_race_auto_v9(target_date, venue, race_num):
         input_dict[f'{w}枠登番'] = toban
         input_dict[f'{w}枠展示'] = boat_data[w]['展示']
         
-        # 【超シンプル＆確実】デバッグ情報に合わせたデータ抽出
         c_stats = racer_stat_dict.get(int(toban), racer_stat_dict.get(str(toban), {}))
         
         rate_1st = float(c_stats.get('1着率', 0.0))
@@ -133,25 +132,21 @@ def predict_race_auto_v9(target_date, venue, race_num):
         rate_3ren = float(c_stats.get('3連対率', 0.0))
         avg_st = float(c_stats.get('平均ST', 0.17))
 
-        # 万が一％表記（例：15.0）で保存されていた場合は小数に直す
         if rate_1st > 1.0: rate_1st /= 100.0
         if rate_2ren > 1.0: rate_2ren /= 100.0
         if rate_3ren > 1.0: rate_3ren /= 100.0
 
-        # DataFrame（AIの脳）には全体勝率をそのまま渡す
         input_dict[f'{w}枠_1着率'] = rate_1st
         input_dict[f'{w}枠_2連対率'] = rate_2ren
         input_dict[f'{w}枠_3連対率'] = rate_3ren
         input_dict[f'{w}枠_平均ST'] = avg_st
         
-        # モーターデータ
         m_stats = motor_stat_dict.get((int(env_data['会場']), int(motor)), motor_stat_dict.get((str(env_data['会場']), str(motor)), {}))
         input_dict[f'{w}枠_M2連対'] = m_stats.get('m_rate_2ren', m_stats.get('2連対率', 0.0))
         input_dict[f'{w}枠_M3連対'] = m_stats.get('m_rate_3ren', m_stats.get('3連対率', 0.0))
 
     X_pred = pd.DataFrame([input_dict], columns=train_features)
     
-    # AIの脳内から「学習時のカテゴリー構造」を直接取り出して完全に同期させる（型エラー防止）
     booster = getattr(model_1st, 'booster_', getattr(model_1st, '_Booster', None))
     if booster and hasattr(booster, 'pandas_categorical') and booster.pandas_categorical:
         for item in booster.pandas_categorical:
@@ -171,30 +166,41 @@ def predict_race_auto_v9(target_date, venue, race_num):
                         X_pred[col_name] = X_pred[col_name].astype(str)
                 X_pred[col_name] = pd.Categorical(X_pred[col_name], categories=cats)
 
-    # 数値データの整形
     for col in X_pred.columns:
         if str(X_pred[col].dtype) == 'object':
             X_pred[col] = pd.to_numeric(X_pred[col], errors='coerce').fillna(0.0)
 
-    # 予測を実行
     preds_1st = model_1st.predict_proba(X_pred)[0]
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
     
-    # 【進化ポイント：コース適性シミュレーター】
-    # 全体勝率をそのまま使うのではなく、コースごとの有利不利を掛けて「本当の脅威度」を算出する！
+    # 🔥【進化ポイント：格上ロジック（イン潰し）の完全実装】
     course_multipliers = {1: 2.8, 2: 1.0, 3: 0.8, 4: 0.7, 5: 0.3, 6: 0.1}
     adjusted_1st = np.zeros(6)
+    
+    # 1枠の級別スコアを取得（イン逃げの信頼度を測るため）
+    rank_score = {"A1": 4, "A2": 3, "B1": 2, "B2": 1}
+    in_rank_val = rank_score.get(boat_data[1]['級別'], 2)
     
     for i in range(6):
         waku = i + 1
         rank = boat_data[waku]['級別']
         rhythm = boat_data[waku]['今節調子スコア']
+        my_rank_val = rank_score.get(rank, 2)
         
-        # 選手の全体1着率 × コースごとの補正値 ＝ そのコースでの真の実力（得意技）
         c_1st_rate = input_dict[f'{waku}枠_1着率'] * course_multipliers[waku]
         
-        r_weight = 1.3 if rank == "A1" else (1.1 if rank == "A2" else (1.0 if rank == "B1" else 0.7))
+        # 階級の重みを過激化（A1はB1の3倍の実力評価）
+        r_weight = 3.0 if rank == "A1" else (1.8 if rank == "A2" else (1.0 if rank == "B1" else 0.5))
+        
+        # 🚨 プロのセオリー：「1枠がB級」かつ「外にA級」の展開予想！
+        if waku == 1 and in_rank_val <= 2: 
+            # 1枠がB1/B2の場合、逃げきれない（イン飛び）確率を大幅に上げる
+            r_weight *= 0.35 
+        if waku > 1 and my_rank_val > in_rank_val:
+            # インの選手より自分が格上の場合（2枠A1 vs 1枠B1など）、差し・まくりのアタマ確率を激増！
+            r_weight *= 3.0 
+            
         technique_bonus = 1.0 + (c_1st_rate * 2.5)
         waku_base = 1.4 if waku == 1 else (1.1 if waku == 2 else (1.0 if waku == 3 else (0.9 if waku == 4 else 0.7)))
         
@@ -218,7 +224,6 @@ def predict_race_auto_v9(target_date, venue, race_num):
     for i in range(1, 7):
         r = boat_data[i]['級別']
         st_val = input_dict[f'{i}枠_平均ST']
-        # 画面にはコース補正済みの「リアルな数値」を表示
         c_1st = input_dict[f'{i}枠_1着率'] * course_multipliers[i] * 100
         result_text += f"{i}枠({r}): 当該コース1着実績(得意技) {c_1st:.1f}% / ST:{st_val:.2f}\n"
         
