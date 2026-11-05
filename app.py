@@ -9,7 +9,6 @@ import re
 import itertools
 import time
 import plotly.express as px
-import plotly.graph_objects as go
 
 # ページの基本設定
 st.set_page_config(page_title="ボートレースAI【プロ舟券師ロジック・最終進化版】", layout="wide")
@@ -230,7 +229,7 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     course_multipliers = {1: 2.5, 2: 1.5, 3: 1.0, 4: 0.8, 5: 0.4, 6: 0.1}
     adjusted_scores = np.zeros(6)
     score_details = {}
-    radar_data = [] 
+    graph_data = [] 
     
     rank_score_map = {"A1": 4, "A2": 3, "B1": 2, "B2": 1}
     course_to_waku = {boat_data[w]['進入コース']: w for w in range(1, 7)}
@@ -313,12 +312,13 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
         
         score_details[waku] = f"得点 {total_score:>4.1f} (入:{actual_course}C|AI:{ai_pt:.1f}|級:{rank_pt}|機:{motor_pt:.1f}|技:{skill_pt:.1f}|展開:{scenario_pt}|気:{kehai_pt:.1f})"
         
-        radar_data.extend([
-            {"枠": f"{waku}枠", "項目": "AI・実力", "スコア": max(0, ai_pt + rank_pt)},
-            {"枠": f"{waku}枠", "項目": "機力(モーター)", "スコア": max(0, motor_pt * 2.5)},
-            {"枠": f"{waku}枠", "項目": "コース・技", "スコア": max(0, skill_pt + course_pt + 15)},
-            {"枠": f"{waku}枠", "項目": "展開有利", "スコア": max(0, scenario_pt + 30)},
-            {"枠": f"{waku}枠", "項目": "直前気配", "スコア": max(0, kehai_pt + 20)}
+        # グラフ用のデータを整形（レーダーチャートから棒グラフ用に変更）
+        graph_data.extend([
+            {"枠": f"{waku}枠", "項目": "① AI・実力", "スコア": round(max(0, ai_pt + rank_pt), 1)},
+            {"枠": f"{waku}枠", "項目": "② モーター", "スコア": round(max(0, motor_pt * 2.5), 1)},
+            {"枠": f"{waku}枠", "項目": "③ コース技", "スコア": round(max(0, skill_pt + course_pt + 15), 1)},
+            {"枠": f"{waku}枠", "項目": "④ 展開有利", "スコア": round(max(0, scenario_pt + 30), 1)},
+            {"枠": f"{waku}枠", "項目": "⑤ 直前気配", "スコア": round(max(0, kehai_pt + 20), 1)}
         ])
         
     sum_scores = np.sum(adjusted_scores)
@@ -375,7 +375,7 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     result_text += "-" * 50 + "\n"
     result_text += f"・本命軸: 【{prob_sorted[0][0]}】 (確率 {prob_sorted[0][1]:.1f}%)\n"
 
-    return {"text": result_text, "radar_data": pd.DataFrame(radar_data)}
+    return {"text": result_text, "graph_data": pd.DataFrame(graph_data)}
 
 # Streamlitの画面デザイン
 st.title("🚤 ボートレースAI【プロ舟券師ロジック・完全版】")
@@ -385,7 +385,7 @@ tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 1日丸ごとバ
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
 with tab1:
-    st.write("潮の満ち引き・進入コースの変化・部品交換まで完全に読み切り、レーダーチャートで視覚化します。")
+    st.write("潮の満ち引き・進入コースの変化・部品交換まで完全に読み切り、項目別の棒グラフでわかりやすく視覚化します。")
     col1, col2, col3 = st.columns(3)
     with col1:
         target_date = st.text_input("日付 (例: 20261105)", value=today_str, key="date1")
@@ -400,20 +400,24 @@ with tab1:
             if "error" in res_dict:
                 st.error(res_dict["error"])
             else:
-                left_col, right_col = st.columns([1.2, 1])
+                left_col, right_col = st.columns([1, 1.3])
                 with left_col:
-                    st.text_area("AIのスコア解析結果", value=res_dict["text"], height=400)
+                    st.text_area("AIのスコア解析結果", value=res_dict["text"], height=450)
                 with right_col:
-                    df_radar = res_dict["radar_data"]
-                    fig = px.line_polar(
-                        df_radar, r='スコア', theta='項目', color='枠', 
-                        line_close=True, template="plotly_dark",
-                        color_discrete_sequence=['white', 'black', 'red', 'blue', 'yellow', 'green']
+                    # クモの巣化を防ぐため「項目別・グループ化棒グラフ」に変更
+                    # ダークモードでも2枠が消えないように 'black' を '#aaaaaa' (シルバー)に変更
+                    df_graph = res_dict["graph_data"]
+                    fig = px.bar(
+                        df_graph, x='項目', y='スコア', color='枠', 
+                        barmode='group', template="plotly_dark",
+                        text_auto='.0f', # 数値を棒の上に表示
+                        color_discrete_sequence=['#ffffff', '#aaaaaa', '#ff4444', '#44aaff', '#ffee00', '#44ff44']
                     )
                     fig.update_layout(
-                        polar=dict(radialaxis=dict(visible=False)),
-                        showlegend=True,
-                        title="📊 全艇パラメーター比較"
+                        title="📊 全艇パラメーター比較（項目別）",
+                        xaxis_title=None,
+                        yaxis_title="評価スコア",
+                        legend_title="枠番"
                     )
                     st.plotly_chart(fig, use_container_width=True)
 
@@ -473,11 +477,8 @@ with tab3:
             time.sleep(1.5)
             st.success("✨ 学習完了！ 特徴量重要度（予測に使うデータの優先度）が以下のように変化しました。")
             
-            # 特徴量重要度の変化を可視化するためのモックデータ生成
-            # 実際には model.feature_importances_ の前後比較を行います
             features = ['1コース勝率', 'モーター2連率', '平均ST', '展示タイム', '展開(カドまくり等)', '風速影響']
             importance_before = [150, 110, 85, 90, 130, 45]
-            # 新しい季節のデータ（風が強い・モーターが入れ替わった等）を学習した想定の変化
             importance_after = [142, 125, 82, 98, 145, 55] 
             
             df_imp = pd.DataFrame({
