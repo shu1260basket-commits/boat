@@ -174,35 +174,37 @@ def predict_race_auto_v9(target_date, venue, race_num):
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
     
-    # 🔥【進化ポイント：格上ロジック（イン潰し）の完全実装】
-    course_multipliers = {1: 2.8, 2: 1.0, 3: 0.8, 4: 0.7, 5: 0.3, 6: 0.1}
+    # 🔥【進化ポイント：2枠アタマ（2アタマ）完全特化ロジックに修正】
+    course_multipliers = {1: 2.5, 2: 1.5, 3: 1.0, 4: 0.8, 5: 0.4, 6: 0.1}
     adjusted_1st = np.zeros(6)
     
-    # 1枠の級別スコアを取得（イン逃げの信頼度を測るため）
-    rank_score = {"A1": 4, "A2": 3, "B1": 2, "B2": 1}
-    in_rank_val = rank_score.get(boat_data[1]['級別'], 2)
+    in_rank = boat_data[1]['級別']
     
     for i in range(6):
         waku = i + 1
         rank = boat_data[waku]['級別']
         rhythm = boat_data[waku]['今節調子スコア']
-        my_rank_val = rank_score.get(rank, 2)
         
         c_1st_rate = input_dict[f'{waku}枠_1着率'] * course_multipliers[waku]
         
-        # 階級の重みを過激化（A1はB1の3倍の実力評価）
-        r_weight = 3.0 if rank == "A1" else (1.8 if rank == "A2" else (1.0 if rank == "B1" else 0.5))
+        # 基本の階級重み（やりすぎない程度に）
+        r_weight = 2.0 if rank == "A1" else (1.5 if rank == "A2" else (1.0 if rank == "B1" else 0.7))
         
-        # 🚨 プロのセオリー：「1枠がB級」かつ「外にA級」の展開予想！
-        if waku == 1 and in_rank_val <= 2: 
-            # 1枠がB1/B2の場合、逃げきれない（イン飛び）確率を大幅に上げる
-            r_weight *= 0.35 
-        if waku > 1 and my_rank_val > in_rank_val:
-            # インの選手より自分が格上の場合（2枠A1 vs 1枠B1など）、差し・まくりのアタマ確率を激増！
-            r_weight *= 3.0 
+        # 🚨 プロのセオリー：1枠B級 × 2枠A級 の「2アタマ完全特化」！
+        if waku == 1 and in_rank in ["B1", "B2"]:
+            # 1枠がB級なら、イン逃げ確率をガッツリ削る
+            r_weight *= 0.4 
             
-        technique_bonus = 1.0 + (c_1st_rate * 2.5)
-        waku_base = 1.4 if waku == 1 else (1.1 if waku == 2 else (1.0 if waku == 3 else (0.9 if waku == 4 else 0.7)))
+        if waku == 2 and rank in ["A1", "A2"] and in_rank in ["B1", "B2"]:
+            # 2枠がA級なら、圧倒的なアタマ候補（差し・まくり）に格上げ！
+            r_weight *= 3.5 
+            
+        if waku >= 3 and rank in ["A1", "A2"] and in_rank in ["B1", "B2"]:
+            # 3枠以降の外のA級は「ヒモ（2着3着）」には来るが、過剰なアタマ評価はしない
+            r_weight *= 1.2 
+
+        technique_bonus = 1.0 + (c_1st_rate * 2.0)
+        waku_base = 1.4 if waku == 1 else (1.2 if waku == 2 else (1.0 if waku == 3 else (0.8 if waku == 4 else 0.6)))
         
         adjusted_1st[i] = preds_1st[i] * r_weight * waku_base * technique_bonus * rhythm
         
