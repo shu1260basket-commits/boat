@@ -1,3 +1,4 @@
+%%writefile app.py
 import streamlit as st
 import pandas as pd
 import pickle
@@ -9,11 +10,12 @@ import re
 import itertools
 
 # ページの基本設定
-st.set_page_config(page_title="ボートレースAI【B2排除・王道堅実版】", layout="centered")
+st.set_page_config(page_title="ボートレースAI【決まり手完全連動・進化版】", layout="centered")
 
-# 1. AIと各種辞書の読み込み
+# 1. AIと各種辞書の読み込み（Googleドライブのパス、または直下のパスを指定）
 @st.cache_resource
 def load_brain():
+    # ファイル名が 'boat_ai_brain_v9.pkl' の場合（もしドライブのパスならここを '/content/drive/MyDrive/boat_ai_brain_v9.pkl' に変更してな）
     with open('boat_ai_brain_v9.pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return (
@@ -34,7 +36,7 @@ VENUE_MAP = {
     "下関": "19", "若松": "20", "芦屋": "21", "福岡": "22", "唐津": "23", "大村": "24"
 }
 
-# 2. スクレイピング関数
+# 2. スクレイピング関数（今節の調子・ST・展示を網羅）
 def scrape_boatrace_data_v9(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
@@ -86,7 +88,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
                 '級別': rank, 
                 'モーター': motor, 
                 '展示': 0.0,
-                '今節調子スコア': max(0.2, (6.0 - avg_finish) / 2.5)
+                '今節調子スコア': max(0.5, (6.0 - avg_finish) / 2.0)
             }
             
         res_before = requests.get(url_before, headers=headers)
@@ -112,7 +114,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
     except Exception as e:
         return None, None, False, f"読み込み失敗: {str(e)}"
 
-# 3. 予想実行関数（★B2級を徹底的に排除し、実力と階級の優劣をハッキリさせる王道ロジック）
+# 3. 予想実行関数
 def predict_race_auto_v9(target_date, venue, race_num):
     boat_data, env_data, success, msg = scrape_boatrace_data_v9(target_date, venue, race_num)
     if not success: return msg
@@ -144,52 +146,20 @@ def predict_race_auto_v9(target_date, venue, race_num):
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
     
-    # 【1着の厳格な階級・枠番フィルター】
     adjusted_1st = np.zeros(6)
     for i in range(6):
         waku = i + 1
         rank = boat_data[waku]['級別']
         rhythm = boat_data[waku]['今節調子スコア']
+        c_1st_rate = input_dict[f'{waku}枠_1着率']
         
-        # 級別の優劣をハッキリさせる（B2は1着ほぼ絶望、B1も外枠なら激減）
-        if rank == "A1":
-            r_weight = 2.0
-        elif rank == "A2":
-            r_weight = 1.3
-        elif rank == "B1":
-            r_weight = 0.6 if waku >= 4 else 0.8
-        else: # B2級
-            r_weight = 0.05 # 1着はほぼ不可能レベルまで極限カット
-            
-        waku_weight = 2.2 if waku == 1 else (1.5 if waku == 2 else (1.0 if waku == 3 else (0.3 if waku == 4 else 0.1)))
+        r_weight = 1.3 if rank == "A1" else (1.1 if rank == "A2" else (1.0 if rank == "B1" else 0.7))
+        technique_bonus = 1.0 + (c_1st_rate * 2.5)
+        waku_base = 1.4 if waku == 1 else (1.1 if waku == 2 else (1.0 if waku == 3 else (0.9 if waku == 4 else 0.7)))
         
-        adjusted_1st[i] = preds_1st[i] * r_weight * waku_weight * rhythm
+        adjusted_1st[i] = preds_1st[i] * r_weight * waku_base * technique_bonus * rhythm
         
     preds_1st = adjusted_1st / np.sum(adjusted_1st)
-
-    # 【2着・3着（ヒモ）の厳格な階級フィルター】
-    # B2級が2着・3着に絡む確率も、実力不足な選手は徹底的にペナルティをかける
-    adjusted_2nd = np.zeros(6)
-    adjusted_3rd = np.zeros(6)
-    for i in range(6):
-        waku = i + 1
-        rank = boat_data[waku]['級別']
-        rhythm = boat_data[waku]['今節調子スコア']
-        
-        if rank == "A1":
-            r2_w, r3_w = 1.5, 1.3
-        elif rank == "A2":
-            r2_w, r3_w = 1.2, 1.1
-        elif rank == "B1":
-            r2_w, r3_w = 0.7, 0.8
-        else: # B2級はヒモ（2・3着）でも極めて入りにくい
-            r2_w, r3_w = 0.1, 0.2
-            
-        adjusted_2nd[i] = preds_2nd[i] * r2_w * rhythm
-        adjusted_3rd[i] = preds_3rd[i] * r3_w * rhythm
-        
-    preds_2nd = adjusted_2nd / np.sum(adjusted_2nd)
-    preds_3rd = adjusted_3rd / np.sum(adjusted_3rd)
 
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
@@ -201,17 +171,18 @@ def predict_race_auto_v9(target_date, venue, race_num):
     total_p = sum(x[1] for x in raw_probs)
     final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
     
-    result_text = f"🌐 【B2排除・王道堅実版】解析完了！\n"
+    result_text = f"🌐 【決まり手完全連動・進化版】解析完了！\n"
     result_text += f"🌪️ 水面環境: 風速 {env_data['風速']}m / 波高 {env_data['波高']}cm\n\n"
     
     for i in range(1, 7):
         r = boat_data[i]['級別']
         st = input_dict[f'{i}枠_平均ST']
-        result_text += f"{i}枠({r}): 登番{boat_data[i]['登番']} / ST:{st:.2f}\n"
+        c_1st = input_dict[f'{i}枠_1着率'] * 100
+        result_text += f"{i}枠({r}): 当該コース1着実績(得意技) {c_1st:.1f}% / ST:{st:.2f}\n"
         
     prob_sorted = sorted(final_probs, key=lambda x: x[1], reverse=True)
     
-    result_text += f"\n🎯 現実的・推奨買い目（上位6点）\n"
+    result_text += f"\n🎯 得意技・展開考慮の推奨買い目（上位6点）\n"
     result_text += "-" * 50 + "\n"
     for i, item in enumerate(prob_sorted[:6]):
         result_text += f"推奨 {i+1}点目: 【{item[0]}】 予想確率: {item[1]:>4.1f}%\n"
@@ -222,7 +193,7 @@ def predict_race_auto_v9(target_date, venue, race_num):
     return result_text
 
 # Streamlitの画面デザイン
-st.title("🚤 ボートレースAI【B2排除・王道堅実版】")
+st.title("🚤 ボートレースAI【決まり手完全連動・進化版】")
 
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
@@ -234,7 +205,7 @@ with col2:
 with col3:
     race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1)
 
-if st.button("⚡ 階級の優劣をハッキリさせて予想！", type="primary"):
-    with st.spinner("B2級を厳しく減点して解析中..."):
+if st.button("⚡ 得意技を反映して予想！", type="primary"):
+    with st.spinner("選手の決まり手実績・コース適性を分析中..."):
         res = predict_race_auto_v9(target_date, venue, race_num)
-        st.text_area("AIの最終解析結果", value=res, height=450)
+        st.text_area("AIの進化解析結果", value=res, height=450)
