@@ -75,10 +75,10 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
             else:
                 avg_finish = 3.5
             
-            tds = tbody.find_all('td')
+            # モーター番号を少し広めに抽出（公式サイトの構造ズレ対策）
             try:
-                motor_text = tds[6].text.strip()
-                motor = int(re.search(r'^(\d{1,3})', motor_text).group(1))
+                motor_match = re.findall(r'\b(\d{1,3})\b', tbody.text)
+                motor = int(motor_match[-6]) if len(motor_match) > 6 else 0
             except: motor = 0
             
             boat_data[waku] = {
@@ -141,9 +141,16 @@ def predict_race_auto_v9(target_date, venue, race_num):
         input_dict[f'{w}枠_3連対率'] = rate_3ren
         input_dict[f'{w}枠_平均ST'] = avg_st
         
-        m_stats = motor_stat_dict.get((int(env_data['会場']), int(motor)), motor_stat_dict.get((str(env_data['会場']), str(motor)), {}))
-        input_dict[f'{w}枠_M2連対'] = m_stats.get('m_rate_2ren', m_stats.get('2連対率', 0.0))
-        input_dict[f'{w}枠_M3連対'] = m_stats.get('m_rate_3ren', m_stats.get('3連対率', 0.0))
+        # 🔥【修正】モーター辞書を総当たりで検索して確実にデータを引っこ抜く！
+        m_stats = motor_stat_dict.get((int(env_data['会場']), int(motor)), {})
+        if not m_stats:
+            m_stats = motor_stat_dict.get(int(motor), motor_stat_dict.get(str(motor), {}))
+            
+        m_2ren = float(m_stats.get('2連対率', m_stats.get('2連率', m_stats.get('m_rate_2ren', 0.0))))
+        if m_2ren > 1.0: m_2ren /= 100.0
+        
+        input_dict[f'{w}枠_M2連対'] = m_2ren
+        input_dict[f'{w}枠_M3連対'] = float(m_stats.get('3連対率', m_stats.get('3連率', 0.0)))
 
     X_pred = pd.DataFrame([input_dict], columns=train_features)
     
@@ -170,7 +177,6 @@ def predict_race_auto_v9(target_date, venue, race_num):
         if str(X_pred[col].dtype) == 'object':
             X_pred[col] = pd.to_numeric(X_pred[col], errors='coerce').fillna(0.0)
 
-    # 1着の生確率だけをAIから貰い、2着3着の確率（バグの元）は使わない！
     preds_1st = model_1st.predict_proba(X_pred)[0]
     
     course_multipliers = {1: 2.5, 2: 1.5, 3: 1.0, 4: 0.8, 5: 0.4, 6: 0.1}
@@ -178,10 +184,13 @@ def predict_race_auto_v9(target_date, venue, race_num):
     score_details = {}
     
     in_rank = boat_data[1]['級別']
+    rank_score_map = {"A1": 4, "A2": 3, "B1": 2, "B2": 1}
+    in_rank_val = rank_score_map.get(in_rank, 2)
     
     for i in range(6):
         waku = i + 1
         rank = boat_data[waku]['級別']
+        rank_val = rank_score_map.get(rank, 2)
         
         ai_pt = preds_1st[i] * 50.0
         rank_pt = {"A1": 25, "A2": 15, "B1": 5, "B2": 0}.get(rank, 5)
@@ -195,17 +204,23 @@ def predict_race_auto_v9(target_date, venue, race_num):
         course_pt = {1: 20, 2: 10, 3: 5, 4: 5, 5: 0, 6: -5}[waku]
         
         scenario_pt = 0
-        if waku == 1 and in_rank in ["B1", "B2"]:
+        # インがB級なら無条件で減点
+        if waku == 1 and in_rank_val <= 2:
             scenario_pt -= 25 
-        elif waku in [2, 3, 4] and rank in ["A1", "A2"] and in_rank in ["B1", "B2"]:
-            scenario_pt += 20 
+            
+        # 🔥【格上キラーロジック】インの選手より「自分の級別」が上なら、強烈にアタマ評価を加算！
+        if waku > 1 and rank_val > in_rank_val:
+            scenario_pt += 25  # 格上の差し・まくり加点
+            
+            # さらに2枠が格上の場合は大チャンスなのでボーナス
+            if waku == 2:
+                scenario_pt += 10
             
         total_score = max(1.0, ai_pt + rank_pt + motor_pt + skill_pt + course_pt + scenario_pt)
         adjusted_scores[i] = total_score
         
         score_details[waku] = f"総得点 {total_score:>4.1f}点 (AI:{ai_pt:.1f}/級別:{rank_pt}/M:{motor_pt:.1f}/技:{skill_pt:.1f}/展開:{scenario_pt})"
         
-    # 🚨【究極の解決策】スコアから直接「確率」を割り出すプロの計算方式を導入
     sum_scores = np.sum(adjusted_scores)
     
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
@@ -216,11 +231,8 @@ def predict_race_auto_v9(target_date, venue, race_num):
         score2 = adjusted_scores[r2]
         score3 = adjusted_scores[r3]
         
-        # 1着の確率（全体のスコアから）
         p1 = score1 / sum_scores
-        # 2着の確率（1着になった艇を除いた残りからの確率）
         p2 = score2 / (sum_scores - score1)
-        # 3着の確率（1着・2着を除いた残りからの確率）
         p3 = score3 / (sum_scores - score1 - score2)
         
         p = p1 * p2 * p3
