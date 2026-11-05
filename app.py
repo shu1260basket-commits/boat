@@ -15,7 +15,7 @@ st.set_page_config(page_title="ボートレースAI【決まり手完全連動�
 @st.cache_resource
 def load_brain():
     # ファイル名が 'boat_ai_brain_v9.pkl' の場合（もしドライブのパスならここを '/content/drive/MyDrive/boat_ai_brain_v9.pkl' に変更してな）
-    with open('boat_ai_brain_v9　.pkl', 'rb') as f:
+    with open('boat_ai_brain_v9 .pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return (
         saved_data['model_1st'],
