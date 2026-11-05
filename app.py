@@ -70,7 +70,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
         
         tbodies_list = soup_list.find_all('tbody', class_='is-fs12')
         if len(tbodies_list) < 6:
-            return None, None, False, f"出走表が見つかりません。URL: {url_list}"
+            return None, None, False, f"出走表未公開"
             
         for waku, tbody in enumerate(tbodies_list[:6], 1):
             text_data = tbody.text.replace('\n', ' ').replace('\r', ' ')
@@ -136,7 +136,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
                     
         return boat_data, env_data, True, url_before
     except Exception as e:
-        return None, None, False, f"読み込み失敗: {str(e)}"
+        return None, None, False, f"読込失敗: {str(e)}"
 
 def fetch_actual_result(target_date, jcd, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
@@ -312,7 +312,6 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
         
         score_details[waku] = f"得点 {total_score:>4.1f} (入:{actual_course}C|AI:{ai_pt:.1f}|級:{rank_pt}|機:{motor_pt:.1f}|技:{skill_pt:.1f}|展開:{scenario_pt}|気:{kehai_pt:.1f})"
         
-        # グラフ用のデータを整形（レーダーチャートから棒グラフ用に変更）
         graph_data.extend([
             {"枠": f"{waku}枠", "項目": "① AI・実力", "スコア": round(max(0, ai_pt + rank_pt), 1)},
             {"枠": f"{waku}枠", "項目": "② モーター", "スコア": round(max(0, motor_pt * 2.5), 1)},
@@ -380,7 +379,7 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
 # Streamlitの画面デザイン
 st.title("🚤 ボートレースAI【プロ舟券師ロジック・完全版】")
 
-tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 1日丸ごとバックテスト", "🧠 AI自己進化"])
+tab1, tab2, tab3, tab4 = st.tabs(["🚤 通常予想モード", "📊 1日丸ごとバックテスト", "🧠 AI自己進化", "🎯 全国スナイパー"])
 
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
@@ -400,23 +399,15 @@ with tab1:
             if "error" in res_dict:
                 st.error(res_dict["error"])
             else:
-                # テキストエリアを上に配置
                 st.text_area("AIのスコア解析結果", value=res_dict["text"], height=400)
-                
-                # グラフをテキストの下に広々と配置
                 df_graph = res_dict["graph_data"]
                 fig = px.bar(
                     df_graph, x='項目', y='スコア', color='枠', 
                     barmode='group', template="plotly_dark",
-                    text_auto='.0f', # 数値を棒の上に表示
+                    text_auto='.0f', 
                     color_discrete_sequence=['#ffffff', '#aaaaaa', '#ff4444', '#44aaff', '#ffee00', '#44ff44']
                 )
-                fig.update_layout(
-                    title="📊 全艇パラメーター比較（項目別）",
-                    xaxis_title=None,
-                    yaxis_title="評価スコア",
-                    legend_title="枠番"
-                )
+                fig.update_layout(title="📊 全艇パラメーター比較（項目別）", xaxis_title=None, yaxis_title="評価スコア", legend_title="枠番")
                 st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
@@ -451,7 +442,6 @@ with tab2:
             
         my_bar.empty()
         st.success(f"{bt_venue}全12レースのバックテストが完了しました！")
-        
         df_results = pd.DataFrame(results)
         df_results.set_index("race_num", inplace=True)
         st.dataframe(df_results, use_container_width=True)
@@ -484,7 +474,6 @@ with tab3:
                 '重要度スコア': importance_before + importance_after,
                 'バージョン': ['学習前 (v9.0)']*6 + ['学習後 (v9.1)']*6
             })
-            
             fig_imp = px.bar(
                 df_imp, x='予測ファクター', y='重要度スコア', color='バージョン', 
                 barmode='group', template='plotly_dark',
@@ -492,5 +481,81 @@ with tab3:
             )
             fig_imp.update_layout(title="📈 学習ビフォーアフター：AIが重視するポイントの変化")
             st.plotly_chart(fig_imp, use_container_width=True)
+
+with tab4:
+    st.header("🎯 全国スナイパー（激アツ検知モード）")
+    st.write("全国のレース場を自動スキャンし、「インが弱く外が強い」「風が強い」「カドにA級がいる」など、高配当が狙える波乱レースだけをあぶり出します。")
+    
+    col1_sn, col2_sn = st.columns([1, 3])
+    with col1_sn:
+        snipe_date = st.text_input("スキャン日付", value=today_str, key="date4")
+    with col2_sn:
+        # デフォルトでは処理時間短縮のため、いくつかの場をプリセット選択
+        target_venues = st.multiselect(
+            "スキャン対象の会場（複数選択可）", 
+            options=list(VENUE_MAP.keys()), 
+            default=["平和島", "戸田", "江戸川", "鳴門", "福岡"]
+        )
+        
+    st.caption("※対象会場が多いとスキャンに時間がかかります（1会場あたり約10秒）。")
+    
+    if st.button("📡 激アツレースを探知する", type="primary"):
+        if not target_venues:
+            st.error("スキャン対象の会場を1つ以上選択してください。")
+        else:
+            hot_races = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
             
-            st.caption("※グラフの解説：今回の学習により、AIは以前よりも「モーター2連率」と「展開(カドまくり等)」をより強く重視して予想するようになりました。")
+            total_scans = len(target_venues) * 12
+            scan_count = 0
+            
+            for venue in target_venues:
+                for r_num in range(1, 13):
+                    scan_count += 1
+                    status_text.text(f"📡 スキャン中... {venue} {r_num}R ({scan_count}/{total_scans})")
+                    progress_bar.progress(scan_count / total_scans)
+                    
+                    # 出走表データのみを軽量スクレイピング
+                    boat_data, env_data, success, _ = scrape_boatrace_data_v9(snipe_date, venue, r_num)
+                    if not success:
+                        continue
+                        
+                    reasons = []
+                    # 激アツ条件1: イン弱・外強（1枠がB級で、外にA級がいる）
+                    if boat_data[1]['級別'] in ['B1', 'B2']:
+                        if any(boat_data[w]['級別'] in ['A1', 'A2'] for w in [2, 3, 4]):
+                            reasons.append("🚨 イン激弱（1枠B級 / 外にA級）")
+                            
+                    # 激アツ条件2: 4カド特大まくり（3枠がB級の壁なし状態＋4枠がA級）
+                    if boat_data[3]['級別'] in ['B1', 'B2'] and boat_data[4]['級別'] in ['A1', 'A2']:
+                        reasons.append("🔥 4カドまくり特大チャンス")
+                        
+                    # 激アツ条件3: 水面大荒れ（強風または波高）
+                    if env_data['風速'] >= 6.0:
+                        reasons.append(f"🌪️ 荒れ水面（風速{env_data['風速']}m）")
+                        
+                    # 激アツ条件4: アウトの伸び型チルト
+                    if any(boat_data[w]['チルト'] >= 0.5 for w in [4, 5, 6]):
+                        reasons.append("🚀 アウト勢に伸び型チルトあり")
+                        
+                    if len(reasons) > 0:
+                        hot_races.append({
+                            "会場": venue,
+                            "R": f"{r_num}R",
+                            "激アツ理由": " ＋ ".join(reasons),
+                            "風速": f"{env_data['風速']}m",
+                            "1枠": boat_data[1]['級別'],
+                            "4枠": boat_data[4]['級別']
+                        })
+                    time.sleep(0.3) # サーバー負荷軽減
+                    
+            status_text.empty()
+            progress_bar.empty()
+            
+            if hot_races:
+                st.success(f"🎯 {len(hot_races)}件の激アツレースを探知しました！")
+                df_hot = pd.DataFrame(hot_races)
+                st.dataframe(df_hot, use_container_width=True)
+            else:
+                st.info("現在指定された会場には、目立った波乱要素のあるレースはありませんでした。")
