@@ -16,7 +16,7 @@ st.set_page_config(page_title="ボートレースAI【プロ舟券師ロジッ�
 # 1. AIと各種辞書の読み込み
 @st.cache_resource
 def load_brain():
-    with open('boat_ai_brain_v9 .pkl', 'rb') as f:
+    with open('boat_ai_brain_v9.pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return (
         saved_data['model_1st'],
