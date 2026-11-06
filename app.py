@@ -52,11 +52,11 @@ VENUE_1ST_BONUS = {
     "戸田": -15, "江戸川": -10, "平和島": -10, "鳴門": -5
 }
 
-# 🔥 通信安定化（リトライ機構）のセットアップ
+# 🔥 通信安定化＆パイプ増強（並列処理で渋滞しないようにpool_maxsizeを20に拡大）
 session = requests.Session()
-# タイムアウト等で失敗した場合、最大3回（1秒間隔で）自動リトライするプロ仕様の設定
 retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
-session.mount('https://', HTTPAdapter(max_retries=retries))
+adapter = HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20)
+session.mount('https://', adapter)
 session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 })
@@ -75,7 +75,6 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
     env_data = {'風速': 0.0, '波高': 0.0, '会場': int(jcd), '潮': '普通'}
     
     try:
-        # 🔥 timeoutを15秒に延長し、sessionを使ってリトライさせる
         res_list = session.get(url_list, timeout=15)
         res_list.encoding = 'utf-8'
         
@@ -117,7 +116,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
                 '今節調子スコア': max(0.5, (6.0 - avg_finish) / 2.0)
             }
             
-        time.sleep(0.5) # 🔥 サーバーBAN対策の深呼吸（超重要）
+        time.sleep(0.5) 
         
         res_before = session.get(url_before, timeout=15)
         res_before.encoding = 'utf-8'
@@ -444,34 +443,49 @@ with tab2:
     with col2_bt:
         bt_venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=9, key="venue2")
         
-    if st.button("🔄 1R〜12R 一括バックテスト開始", type="primary"):
+    st.caption("※マルチスレッド（並列処理）により1R〜12Rを超高速で一括スキャンします。")
+    
+    if st.button("🔄 1R〜12R 爆速バックテスト開始", type="primary"):
         progress_text = "バックテスト実行中..."
         my_bar = st.progress(0, text=progress_text)
         
         results = []
         jcd = VENUE_MAP[bt_venue]
-        for r_num in range(1, 13):
-            my_bar.progress(r_num / 12.0, text=f"{r_num}Rを解析中...")
+        scan_count = 0
+        total_scans = 12
+        
+        # 🔥 バックテスト用の並行処理関数
+        def run_backtest_single(r_num):
             res_dict = predict_race_auto_v9(bt_date, bt_venue, r_num, is_backtest=True)
             actual_result, actual_payout = fetch_actual_result(bt_date, jcd, r_num)
+            time.sleep(0.3) # サーバーへの優しさ
             
             if res_dict and "error" not in res_dict:
                 res_dict["実際の結果"] = actual_result
                 res_dict["払戻金"] = actual_payout
-                results.append(res_dict)
+                return res_dict
             else:
                 err_msg = res_dict["error"] if res_dict else "データ未公開"
-                results.append({
+                return {
                     "race_num": f"{r_num}R", "本命": f"【失敗】 {err_msg}", "対抗": "-", "穴": "-",
                     "実際の結果": actual_result, "払戻金": actual_payout
-                })
-            # 🔥 リクエスト過多を避けるため、1レース終わるごとに1秒休む
-            time.sleep(1.0) 
-            
+                }
+        
+        # 🔥 6レースずつ同時に並列処理（12枠だとBANリスクがあるため6に制御）
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            futures = {executor.submit(run_backtest_single, r): r for r in range(1, 13)}
+            for future in concurrent.futures.as_completed(futures):
+                scan_count += 1
+                my_bar.progress(scan_count / total_scans, text=f"爆速スキャン中... 完了 {scan_count}/12 レース")
+                results.append(future.result())
+                
         my_bar.empty()
         st.success(f"{bt_venue}全12レースのバックテストが完了しました！")
+        
+        # 並列処理だと順番がバラバラになるため、1R〜12Rの順にソートする
         df_results = pd.DataFrame(results)
-        df_results.set_index("race_num", inplace=True)
+        df_results['R_num'] = df_results['race_num'].str.replace('R', '').astype(int)
+        df_results = df_results.sort_values(by='R_num').drop(columns=['R_num']).set_index("race_num")
         st.dataframe(df_results, use_container_width=True)
 
 with tab3:
@@ -505,7 +519,6 @@ with tab3:
             def evaluate_race_for_sniper(target):
                 venue, r_num = target
                 boat_data, env_data, success, _ = scrape_boatrace_data_v9(snipe_date, venue, r_num)
-                # 🔥 並行アクセス時も0.3秒待機を入れてBANを回避
                 time.sleep(0.3) 
                 if not success:
                     return None
@@ -546,7 +559,6 @@ with tab3:
                     }
                 return None
 
-            # 同時アクセス数は8で固定（上げすぎるとタイムアウトが増える）
             MAX_WORKERS = 8 
             
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
