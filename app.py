@@ -19,7 +19,7 @@ st.set_page_config(page_title="ボートレースAI【プロ舟券師ロジッ�
 # 1. AIと各種辞書の読み込み
 @st.cache_resource
 def load_brain():
-    with open('boat_ai_brain_v9.pkl', 'rb') as f:
+    with open('boat_ai_brain_v9.pkl', 'rb') as f: # 🔥 スペース抜きの正しいファイル名に統一
         saved_data = pickle.load(f)
     return (
         saved_data['model_1st'],
@@ -172,7 +172,13 @@ def fetch_actual_result(target_date, jcd, race_num):
             if '3連単' in tr.text:
                 tds = tr.find_all('td')
                 if len(tds) >= 3:
-                    result_str = tds[1].text.strip().replace('\r', '').replace('\n', '').replace(' ', '')
+                    # 🔥【修正】「123」ではなく「1-2-3」の形式で取得するように修正！これで的中判定が完璧に動く。
+                    raw_text = tds[1].text.strip().replace('\r', '').replace('\n', '').replace(' ', '')
+                    if len(raw_text) >= 3:
+                        result_str = f"{raw_text[0]}-{raw_text[1]}-{raw_text[2]}"
+                    else:
+                        result_str = raw_text
+                        
                     payout_str = tds[2].text.strip().replace('\r', '').replace('\n', '').replace(' ', '').replace('円', '').replace(',', '')
                     payout_val = int(payout_str) if payout_str.isdigit() else 0
                     return result_str, payout_val
@@ -248,7 +254,6 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
         if str(X_pred[col].dtype) == 'object':
             X_pred[col] = pd.to_numeric(X_pred[col], errors='coerce').fillna(0.0)
 
-    # 🔥 ここが極限進化！1着・2着・3着それぞれの専用AIから確率を弾き出す！
     preds_1st = model_1st.predict_proba(X_pred)[0]
     preds_2nd = model_2nd.predict_proba(X_pred)[0]
     preds_3rd = model_3rd.predict_proba(X_pred)[0]
@@ -337,7 +342,6 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
             
         base_bonus = rank_pt + motor_pt + skill_pt + course_pt + scenario_pt + kehai_pt
         
-        # 🔥 それぞれの専用AIの評価に展開ボーナスを上乗せする
         adjusted_scores_1st[i] = max(1.0, (preds_1st[i] * 50.0) + base_bonus)
         adjusted_scores_2nd[i] = max(1.0, (preds_2nd[i] * 50.0) + base_bonus)
         adjusted_scores_3rd[i] = max(1.0, (preds_3rd[i] * 50.0) + base_bonus)
@@ -356,7 +360,6 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
     
-    # 🔥 1着力×2着力×3着力の精密な掛け合わせで確率を算出！
     for (r1, r2, r3) in combos:
         s1 = adjusted_scores_1st[r1]
         s2 = adjusted_scores_2nd[r2]
@@ -373,7 +376,6 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
     prob_sorted = sorted(final_probs, key=lambda x: x[1], reverse=True)
     
-    # フォーメーションの軸を決めるために、1〜3着の総合力が高い順に抽出
     combined_scores = adjusted_scores_1st + adjusted_scores_2nd + adjusted_scores_3rd
     top_indices = np.argsort(combined_scores)[::-1][:4]
     t1, t2, t3, t4 = [i + 1 for i in top_indices]
@@ -418,7 +420,6 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     result_text += f"【逆転軸】 1着: {t2} - 2着: {t1} - 3着: {t3},{t4} (2点)\n"
     result_text += "-" * 50 + "\n"
     
-    # おまけでピンポイント予想も出しておく
     result_text += f"※参考(ピンポイント): 【{prob_sorted[0][0]}】 (確率 {prob_sorted[0][1]:.1f}%)\n"
 
     return {"text": result_text, "graph_data": pd.DataFrame(graph_data)}
@@ -505,7 +506,7 @@ with tab2:
                     
                 return {
                     "R": f"{r_num}R", 
-                    "本命": res_dict["本命"], 
+                    "買い目(8点)": ", ".join(bets), # 🔥 これで8点全部が表に表示される！
                     "実際の結果": actual_result, 
                     "払戻金": f"¥{actual_payout_val:,}" if actual_payout_val > 0 else "-",
                     "判定": status,
@@ -516,7 +517,7 @@ with tab2:
             else:
                 err_msg = res_dict["error"] if res_dict else "データ未公開"
                 return {
-                    "R": f"{r_num}R", "本命": f"【失敗】 {err_msg}", "実際の結果": actual_result, 
+                    "R": f"{r_num}R", "買い目(8点)": f"【失敗】 {err_msg}", "実際の結果": actual_result, 
                     "払戻金": "-", "判定": "-", "収支": 0, "投資": 0, "回収": 0
                 }
         
@@ -541,7 +542,8 @@ with tab2:
         df_results['R_num'] = df_results['R'].str.replace('R', '').astype(int)
         df_results = df_results.sort_values(by='R_num').drop(columns=['R_num']).set_index("R")
         
-        df_display = df_results[['本命', '実際の結果', '払戻金', '判定', '収支']].copy()
+        # 🔥 表の列を「買い目(8点)」に変更！
+        df_display = df_results[['買い目(8点)', '実際の結果', '払戻金', '判定', '収支']].copy()
         df_display['収支'] = df_display['収支'].apply(lambda x: f"+{x:,}円" if x > 0 else f"{x:,}円" if x < 0 else "-")
         
         st.dataframe(df_display, use_container_width=True)
