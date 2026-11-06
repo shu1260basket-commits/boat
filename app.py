@@ -13,8 +13,10 @@ import time
 import plotly.express as px
 import concurrent.futures 
 
+# ページの基本設定
 st.set_page_config(page_title="ボートレースAI【プロ舟券師ロジック・最終進化版】", layout="wide")
 
+# 1. AIと各種辞書の読み込み
 @st.cache_resource
 def load_brain():
     with open('boat_ai_brain_v9.pkl', 'rb') as f:
@@ -58,6 +60,7 @@ session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 })
 
+# 2. スクレイピング関数
 def scrape_boatrace_data_v9(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
@@ -160,7 +163,7 @@ def fetch_actual_result(target_date, jcd, race_num):
         res = session.get(url, timeout=15)
         res.encoding = 'utf-8'
         if res.status_code != 200:
-            return "通信ブロック", "-"
+            return "通信ブロック", 0
             
         soup = BeautifulSoup(res.text, 'html.parser')
         
@@ -170,14 +173,14 @@ def fetch_actual_result(target_date, jcd, race_num):
                 tds = tr.find_all('td')
                 if len(tds) >= 3:
                     result_str = tds[1].text.strip().replace('\r', '').replace('\n', '').replace(' ', '')
-                    payout_str = tds[2].text.strip().replace('\r', '').replace('\n', '').replace(' ', '')
-                    if payout_str and payout_str != "円": payout_str += "円"
-                    return result_str, payout_str
-        return "データなし(休催等)", "-"
+                    payout_str = tds[2].text.strip().replace('\r', '').replace('\n', '').replace(' ', '').replace('円', '').replace(',', '')
+                    payout_val = int(payout_str) if payout_str.isdigit() else 0
+                    return result_str, payout_val
+        return "データなし(休催等)", 0
     except requests.exceptions.Timeout:
-        return "タイムアウト", "-"
+        return "タイムアウト", 0
     except:
-        return "通信エラー", "-"
+        return "通信エラー", 0
 
 def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     boat_data, env_data, success, msg = scrape_boatrace_data_v9(target_date, venue, race_num)
@@ -340,23 +343,32 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
             {"枠": f"{waku}枠", "項目": "④ 展開有利", "スコア": round(max(0, scenario_pt + 30), 1)},
             {"枠": f"{waku}枠", "項目": "⑤ 直前気配", "スコア": round(max(0, kehai_pt + 20), 1)}
         ])
-
-    # 🔥 スコア上位4艇を抽出して「フォーメーション＆ボックス」を構築
-    top4_indices = np.argsort(adjusted_scores)[-4:][::-1]
-    top4_waku = [i + 1 for i in top4_indices]
     
+    # 🔥 AIのスコアから上位4艇をピックアップ
+    top_indices = np.argsort(adjusted_scores)[::-1][:4]
+    t1, t2, t3, t4 = [i + 1 for i in top_indices]
+    
+    # 🔥 プロフェッショナル・フォーメーションの生成（計8点）
+    # 本命: 1着(t1) - 2着(t2,t3,t4) - 3着(t2,t3,t4) = 6点
+    # 逆転: 1着(t2) - 2着(t1) - 3着(t3,t4) = 2点
+    bets = []
+    for second in [t2, t3, t4]:
+        for third in [t2, t3, t4]:
+            if second != third:
+                bets.append(f"{t1}-{second}-{third}")
+    for third in [t3, t4]:
+        bets.append(f"{t2}-{t1}-{third}")
+        
     top1_score = np.max(adjusted_scores)
     top3_score = np.sort(adjusted_scores)[-3]
     is_ken = (top1_score - top3_score) < 15.0 or env_data['風速'] >= 8.0 
     
     if is_backtest:
-        box_str = "".join(map(str, sorted(top4_waku)))
-        form_str = f"{top4_waku[0]}-" + "".join(map(str, sorted(top4_waku[1:])))
         return {
             "race_num": f"{race_num}R",
-            "本命(1着固定)": form_str if not is_ken else "見送り推奨",
-            "上位4艇BOX": box_str if not is_ken else "-",
-            "ピンポイント": f"{top4_waku[0]}-{top4_waku[1]}-{top4_waku[2]}" if not is_ken else "-"
+            "本命": f"{t1}-{t2}-{t3}" if not is_ken else "見送り推奨", # 表示用
+            "フォーメーション": bets if not is_ken else [],          # 計算用
+            "is_ken": is_ken
         }
     
     result_text = f"🌐 【プロ舟券師ロジック・最終形態】解析完了！\n"
@@ -373,22 +385,15 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
         detail = score_details[i]
         result_text += f"{i}枠({r}){f_info}{parts}: 【{detail}】\n"
         
-    result_text += f"\n🎯 AI推奨買い目（取りこぼし防止戦略）\n"
+    result_text += f"\n🎯 黄金フォーメーション買い目（計8点 / ヒモ抜け防止）\n"
     result_text += "-" * 50 + "\n"
-    
-    first_pick = top4_waku[0]
-    others = top4_waku[1:]
-    form_display = f"{first_pick} - " + "・".join(map(str, others)) + " - " + "・".join(map(str, others))
-    result_text += f"① 【1着固定フォーメーション（6点）】\n   ▶ {form_display}\n   ※AIのイチオシ艇が勝つと信じる場合のコスパ最強買い\n\n"
-    
-    box_display = "・".join(map(str, top4_waku)) + " ボックス"
-    result_text += f"② 【激アツ上位4艇ボックス（24点）】\n   ▶ {box_display}\n   ※順番が入れ替わっても確実に拾う、的中率重視のプロ買い\n\n"
-    
-    result_text += f"③ 【ピンポイント推奨（オッズ妙味狙い）】\n   ▶ {top4_waku[0]}-{top4_waku[1]}-{top4_waku[2]}\n"
+    result_text += f"【本命軸】 1着: {t1} - 2,3着: {t2},{t3},{t4} (6点)\n"
+    result_text += f"【逆転軸】 1着: {t2} - 2着: {t1} - 3着: {t3},{t4} (2点)\n"
     result_text += "-" * 50 + "\n"
 
     return {"text": result_text, "graph_data": pd.DataFrame(graph_data)}
 
+# Streamlitの画面デザイン
 st.title("🚤 ボートレースAI【プロ舟券師ロジック・完全版】")
 
 tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 1日丸ごとバックテスト", "🎯 全国スナイパー"])
@@ -423,7 +428,7 @@ with tab1:
                 st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    st.write("1R〜12Rを一気にシミュレーションし、AI予想と「実際の結果・払戻金」を横並びで比較します。")
+    st.write("AIが提案する「黄金フォーメーション（計8点）」が実際に当たっていたか、回収率は何％かを自動計算します。")
     col1_bt, col2_bt = st.columns(2)
     with col1_bt:
         bt_date = st.text_input("日付 (例: 20261105)", value=today_str, key="date2")
@@ -441,26 +446,48 @@ with tab2:
         scan_count = 0
         total_scans = 12
         
+        total_invest = 0
+        total_return = 0
+        
         def run_backtest_single(r_num):
             res_dict = predict_race_auto_v9(bt_date, bt_venue, r_num, is_backtest=True)
-            actual_result, actual_payout = fetch_actual_result(bt_date, jcd, r_num)
+            actual_result, actual_payout_val = fetch_actual_result(bt_date, jcd, r_num)
             time.sleep(0.3) 
             
             if res_dict and "error" not in res_dict:
-                res_dict["実際の結果"] = actual_result
-                res_dict["払戻金"] = actual_payout
-                # ボックス的中判定（上位4艇の中に結果の3艇がすべて含まれているか）
-                actual_list = actual_result.split('-')
-                if len(actual_list) == 3 and all(x in res_dict["上位4艇BOX"] for x in actual_list):
-                    res_dict["ボックス判定"] = "🎯 的中"
+                is_ken = res_dict["is_ken"]
+                bets = res_dict["フォーメーション"]
+                
+                status = "-"
+                profit = 0
+                invest = 0
+                
+                if is_ken:
+                    status = "見送り"
+                elif actual_result in bets:
+                    status = "🎯 的中！"
+                    invest = 800 # 8点 100円ずつ
+                    profit = actual_payout_val - invest
                 else:
-                    res_dict["ボックス判定"] = "❌ ハズレ"
-                return res_dict
+                    status = "❌ ハズレ"
+                    invest = 800
+                    profit = -invest
+                    
+                return {
+                    "R": f"{r_num}R", 
+                    "本命": res_dict["本命"], 
+                    "実際の結果": actual_result, 
+                    "払戻金": f"¥{actual_payout_val:,}" if actual_payout_val > 0 else "-",
+                    "判定": status,
+                    "収支": profit,
+                    "投資": invest,
+                    "回収": actual_payout_val if status == "🎯 的中！" else 0
+                }
             else:
                 err_msg = res_dict["error"] if res_dict else "データ未公開"
                 return {
-                    "race_num": f"{r_num}R", "本命(1着固定)": f"【失敗】 {err_msg}", "上位4艇BOX": "-", "ピンポイント": "-",
-                    "実際の結果": actual_result, "払戻金": actual_payout, "ボックス判定": "-"
+                    "R": f"{r_num}R", "本命": f"【失敗】 {err_msg}", "実際の結果": actual_result, 
+                    "払戻金": "-", "判定": "-", "収支": 0, "投資": 0, "回収": 0
                 }
         
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
@@ -468,15 +495,35 @@ with tab2:
             for future in concurrent.futures.as_completed(futures):
                 scan_count += 1
                 my_bar.progress(scan_count / total_scans, text=f"爆速スキャン中... 完了 {scan_count}/12 レース")
-                results.append(future.result())
+                res = future.result()
+                results.append(res)
+                total_invest += res["投資"]
+                total_return += res["回収"]
                 
         my_bar.empty()
+        
+        # 収支計算
+        net_profit = total_return - total_invest
+        roi = (total_return / total_invest * 100) if total_invest > 0 else 0
+        
         st.success(f"{bt_venue}全12レースのバックテストが完了しました！")
         
         df_results = pd.DataFrame(results)
-        df_results['R_num'] = df_results['race_num'].str.replace('R', '').astype(int)
-        df_results = df_results.sort_values(by='R_num').drop(columns=['R_num']).set_index("race_num")
-        st.dataframe(df_results, use_container_width=True)
+        df_results['R_num'] = df_results['R'].str.replace('R', '').astype(int)
+        df_results = df_results.sort_values(by='R_num').drop(columns=['R_num']).set_index("R")
+        
+        # 表示用のデータフレーム（計算用のカラムを隠す）
+        df_display = df_results[['本命', '実際の結果', '払戻金', '判定', '収支']].copy()
+        df_display['収支'] = df_display['収支'].apply(lambda x: f"+{x:,}円" if x > 0 else f"{x:,}円" if x < 0 else "-")
+        
+        st.dataframe(df_display, use_container_width=True)
+        
+        # 🔥 プロの投資サマリー
+        st.markdown("### 📊 1日トータル収支（1点100円計算）")
+        col_sum1, col_sum2, col_sum3 = st.columns(3)
+        col_sum1.metric("総投資額", f"¥{total_invest:,}")
+        col_sum2.metric("総払戻額", f"¥{total_return:,}")
+        col_sum3.metric("回収率", f"{roi:.1f}%", f"{net_profit:,}円")
 
 with tab3:
     st.header("🎯 全国スナイパー（波乱＆鉄板 爆速検知モード）")
@@ -533,4 +580,43 @@ with tab3:
                     if not any(boat_data[w]['チルト'] >= 0.5 for w in [4, 5, 6]):
                         teppan_reasons.append("💎 イン超鉄板（1枠A1・F無・無風・アウト奇襲無）")
                         if boat_data[2]['級別'] != 'B2':
-                            teppan_reasons
+                            teppan_reasons.append("🛡️ 鉄壁の2コース（壁役が優秀）")
+
+                if haran_reasons:
+                    return {
+                        "会場": venue, "R": f"{r_num}R", "狙い目": "🔥 波乱(穴)",
+                        "探知理由": " ＋ ".join(haran_reasons), "風速": f"{env_data['風速']}m",
+                        "1枠": boat_data[1]['級別'], "4枠": boat_data[4]['級別']
+                    }
+                elif teppan_reasons:
+                    return {
+                        "会場": venue, "R": f"{r_num}R", "狙い目": "💎 鉄板(本命)",
+                        "探知理由": " ＋ ".join(teppan_reasons), "風速": f"{env_data['風速']}m",
+                        "1枠": boat_data[1]['級別'], "4枠": boat_data[4]['級別']
+                    }
+                return None
+
+            MAX_WORKERS = 8 
+            
+            with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {executor.submit(evaluate_race_for_sniper, t): t for t in race_targets}
+                for future in concurrent.futures.as_completed(futures):
+                    scan_count += 1
+                    status_text.text(f"📡 スキャン中... 完了 {scan_count}/{total_scans} レース")
+                    progress_bar.progress(scan_count / total_scans)
+                    
+                    res = future.result()
+                    if res:
+                        hot_races.append(res)
+                        
+            status_text.empty()
+            progress_bar.empty()
+            
+            if hot_races:
+                st.success(f"🎯 {len(hot_races)}件の狙い目レースを探知しました！")
+                df_hot = pd.DataFrame(hot_races)
+                df_hot['R_num'] = df_hot['R'].str.replace('R', '').astype(int)
+                df_hot = df_hot.sort_values(by=['会場', 'R_num']).drop(columns=['R_num']).reset_index(drop=True)
+                st.dataframe(df_hot, use_container_width=True)
+            else:
+                st.info("現在指定された会場には、目立った狙い目（波乱・鉄板）のレースはありませんでした。")
