@@ -248,10 +248,15 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
         if str(X_pred[col].dtype) == 'object':
             X_pred[col] = pd.to_numeric(X_pred[col], errors='coerce').fillna(0.0)
 
+    # 🔥 ここが極限進化！1着・2着・3着それぞれの専用AIから確率を弾き出す！
     preds_1st = model_1st.predict_proba(X_pred)[0]
+    preds_2nd = model_2nd.predict_proba(X_pred)[0]
+    preds_3rd = model_3rd.predict_proba(X_pred)[0]
     
     course_multipliers = {1: 2.5, 2: 1.5, 3: 1.0, 4: 0.8, 5: 0.4, 6: 0.1}
-    adjusted_scores = np.zeros(6)
+    adjusted_scores_1st = np.zeros(6)
+    adjusted_scores_2nd = np.zeros(6)
+    adjusted_scores_3rd = np.zeros(6)
     score_details = {}
     graph_data = [] 
     
@@ -287,7 +292,6 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
         parts = boat_data[waku]['部品交換']
         actual_course = boat_data[waku]['進入コース']
         
-        ai_pt = preds_1st[i] * 50.0
         rank_pt = {"A1": 25, "A2": 15, "B1": 5, "B2": 0}.get(rank, 5)
         motor_pt = input_dict[f'{waku}枠_M2連対'] * 100 * 0.4
         skill_pt = input_dict[f'{waku}枠_1着率'] * course_multipliers[actual_course] * 100.0
@@ -331,26 +335,49 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
         rhythm_score = boat_data[waku]['今節調子スコア']
         kehai_pt += (rhythm_score - 1.25) * 10 
             
-        total_score = max(1.0, ai_pt + rank_pt + motor_pt + skill_pt + course_pt + scenario_pt + kehai_pt)
-        adjusted_scores[i] = total_score
+        base_bonus = rank_pt + motor_pt + skill_pt + course_pt + scenario_pt + kehai_pt
         
-        score_details[waku] = f"得点 {total_score:>4.1f} (入:{actual_course}C|AI:{ai_pt:.1f}|級:{rank_pt}|機:{motor_pt:.1f}|技:{skill_pt:.1f}|展開:{scenario_pt}|気:{kehai_pt:.1f})"
+        # 🔥 それぞれの専用AIの評価に展開ボーナスを上乗せする
+        adjusted_scores_1st[i] = max(1.0, (preds_1st[i] * 50.0) + base_bonus)
+        adjusted_scores_2nd[i] = max(1.0, (preds_2nd[i] * 50.0) + base_bonus)
+        adjusted_scores_3rd[i] = max(1.0, (preds_3rd[i] * 50.0) + base_bonus)
+        
+        score_details[waku] = f"1着力 {adjusted_scores_1st[i]:>4.1f} | 2着力 {adjusted_scores_2nd[i]:>4.1f} | 3着力 {adjusted_scores_3rd[i]:>4.1f}"
         
         graph_data.extend([
-            {"枠": f"{waku}枠", "項目": "① AI・実力", "スコア": round(max(0, ai_pt + rank_pt), 1)},
+            {"枠": f"{waku}枠", "項目": "① AI・実力", "スコア": round(max(0, (preds_1st[i]*50) + rank_pt), 1)},
             {"枠": f"{waku}枠", "項目": "② モーター", "スコア": round(max(0, motor_pt * 2.5), 1)},
             {"枠": f"{waku}枠", "項目": "③ コース技", "スコア": round(max(0, skill_pt + course_pt + 15), 1)},
             {"枠": f"{waku}枠", "項目": "④ 展開有利", "スコア": round(max(0, scenario_pt + 30), 1)},
             {"枠": f"{waku}枠", "項目": "⑤ 直前気配", "スコア": round(max(0, kehai_pt + 20), 1)}
         ])
+        
+    sum_1st = np.sum(adjusted_scores_1st)
+    combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
+    raw_probs = []
     
-    # 🔥 AIのスコアから上位4艇をピックアップ
-    top_indices = np.argsort(adjusted_scores)[::-1][:4]
+    # 🔥 1着力×2着力×3着力の精密な掛け合わせで確率を算出！
+    for (r1, r2, r3) in combos:
+        s1 = adjusted_scores_1st[r1]
+        s2 = adjusted_scores_2nd[r2]
+        s3 = adjusted_scores_3rd[r3]
+        
+        p1 = s1 / sum_1st
+        p2 = s2 / max(1.0, np.sum(adjusted_scores_2nd) - adjusted_scores_2nd[r1])
+        p3 = s3 / max(1.0, np.sum(adjusted_scores_3rd) - adjusted_scores_3rd[r1] - adjusted_scores_3rd[r2])
+        
+        p = p1 * p2 * p3
+        raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", p))
+        
+    total_p = sum(x[1] for x in raw_probs)
+    final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
+    prob_sorted = sorted(final_probs, key=lambda x: x[1], reverse=True)
+    
+    # フォーメーションの軸を決めるために、1〜3着の総合力が高い順に抽出
+    combined_scores = adjusted_scores_1st + adjusted_scores_2nd + adjusted_scores_3rd
+    top_indices = np.argsort(combined_scores)[::-1][:4]
     t1, t2, t3, t4 = [i + 1 for i in top_indices]
     
-    # 🔥 プロフェッショナル・フォーメーションの生成（計8点）
-    # 本命: 1着(t1) - 2着(t2,t3,t4) - 3着(t2,t3,t4) = 6点
-    # 逆転: 1着(t2) - 2着(t1) - 3着(t3,t4) = 2点
     bets = []
     for second in [t2, t3, t4]:
         for third in [t2, t3, t4]:
@@ -359,15 +386,15 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     for third in [t3, t4]:
         bets.append(f"{t2}-{t1}-{third}")
         
-    top1_score = np.max(adjusted_scores)
-    top3_score = np.sort(adjusted_scores)[-3]
+    top1_score = np.max(adjusted_scores_1st)
+    top3_score = np.sort(adjusted_scores_1st)[-3]
     is_ken = (top1_score - top3_score) < 15.0 or env_data['風速'] >= 8.0 
     
     if is_backtest:
         return {
             "race_num": f"{race_num}R",
-            "本命": f"{t1}-{t2}-{t3}" if not is_ken else "見送り推奨", # 表示用
-            "フォーメーション": bets if not is_ken else [],          # 計算用
+            "本命": f"{t1}-{t2}-{t3}" if not is_ken else "見送り推奨",
+            "フォーメーション": bets if not is_ken else [],
             "is_ken": is_ken
         }
     
@@ -377,7 +404,7 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     if is_ken:
         result_text += "⚠️ 【見送り推奨（ケン）】\n上位の実力が拮抗しているか、水面が荒れすぎて難解なレースです。\n\n"
     
-    result_text += "📊 各艇の評価スコア内訳（進入コース・部品交換・潮回り考慮済）\n"
+    result_text += "📊 各艇の評価スコア内訳（1着・2着・3着それぞれのAI評価）\n"
     for i in range(1, 7):
         r = boat_data[i]['級別']
         f_info = f"[F{boat_data[i]['F']}]" if boat_data[i]['F'] > 0 else ""
@@ -390,6 +417,9 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     result_text += f"【本命軸】 1着: {t1} - 2,3着: {t2},{t3},{t4} (6点)\n"
     result_text += f"【逆転軸】 1着: {t2} - 2着: {t1} - 3着: {t3},{t4} (2点)\n"
     result_text += "-" * 50 + "\n"
+    
+    # おまけでピンポイント予想も出しておく
+    result_text += f"※参考(ピンポイント): 【{prob_sorted[0][0]}】 (確率 {prob_sorted[0][1]:.1f}%)\n"
 
     return {"text": result_text, "graph_data": pd.DataFrame(graph_data)}
 
@@ -466,7 +496,7 @@ with tab2:
                     status = "見送り"
                 elif actual_result in bets:
                     status = "🎯 的中！"
-                    invest = 800 # 8点 100円ずつ
+                    invest = 800
                     profit = actual_payout_val - invest
                 else:
                     status = "❌ ハズレ"
@@ -502,7 +532,6 @@ with tab2:
                 
         my_bar.empty()
         
-        # 収支計算
         net_profit = total_return - total_invest
         roi = (total_return / total_invest * 100) if total_invest > 0 else 0
         
@@ -512,14 +541,12 @@ with tab2:
         df_results['R_num'] = df_results['R'].str.replace('R', '').astype(int)
         df_results = df_results.sort_values(by='R_num').drop(columns=['R_num']).set_index("R")
         
-        # 表示用のデータフレーム（計算用のカラムを隠す）
         df_display = df_results[['本命', '実際の結果', '払戻金', '判定', '収支']].copy()
         df_display['収支'] = df_display['収支'].apply(lambda x: f"+{x:,}円" if x > 0 else f"{x:,}円" if x < 0 else "-")
         
         st.dataframe(df_display, use_container_width=True)
         
-        # 🔥 プロの投資サマリー
-        st.markdown("### 📊 1日トータル収支（1点100円計算）")
+        st.markdown("### 📊 1日トータル収支（フォーメーション8点買い・1点100円計算）")
         col_sum1, col_sum2, col_sum3 = st.columns(3)
         col_sum1.metric("総投資額", f"¥{total_invest:,}")
         col_sum2.metric("総払戻額", f"¥{total_return:,}")
