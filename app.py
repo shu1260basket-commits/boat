@@ -19,7 +19,7 @@ st.set_page_config(page_title="ボートレースAI【プロ舟券師ロジッ�
 # 1. AIと各種辞書の読み込み
 @st.cache_resource
 def load_brain():
-    with open('boat_ai_brain_v9.pkl', 'rb') as f: # 🔥 スペース抜きの正しいファイル名に統一
+    with open('boat_ai_brain_v9.pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return (
         saved_data['model_1st'],
@@ -172,10 +172,11 @@ def fetch_actual_result(target_date, jcd, race_num):
             if '3連単' in tr.text:
                 tds = tr.find_all('td')
                 if len(tds) >= 3:
-                    # 🔥【修正】「123」ではなく「1-2-3」の形式で取得するように修正！これで的中判定が完璧に動く。
-                    raw_text = tds[1].text.strip().replace('\r', '').replace('\n', '').replace(' ', '')
-                    if len(raw_text) >= 3:
-                        result_str = f"{raw_text[0]}-{raw_text[1]}-{raw_text[2]}"
+                    # 🔥【完全修正】数字だけを綺麗に抜き出して「1-2-3」の形に強制フォーマットする！
+                    raw_text = tds[1].text.strip()
+                    digits = re.findall(r'[1-6]', raw_text)
+                    if len(digits) >= 3:
+                        result_str = f"{digits[0]}-{digits[1]}-{digits[2]}"
                     else:
                         result_str = raw_text
                         
@@ -506,7 +507,7 @@ with tab2:
                     
                 return {
                     "R": f"{r_num}R", 
-                    "買い目(8点)": ", ".join(bets), # 🔥 これで8点全部が表に表示される！
+                    "買い目(8点)": ", ".join(bets),
                     "実際の結果": actual_result, 
                     "払戻金": f"¥{actual_payout_val:,}" if actual_payout_val > 0 else "-",
                     "判定": status,
@@ -542,7 +543,6 @@ with tab2:
         df_results['R_num'] = df_results['R'].str.replace('R', '').astype(int)
         df_results = df_results.sort_values(by='R_num').drop(columns=['R_num']).set_index("R")
         
-        # 🔥 表の列を「買い目(8点)」に変更！
         df_display = df_results[['買い目(8点)', '実際の結果', '払戻金', '判定', '収支']].copy()
         df_display['収支'] = df_display['収支'].apply(lambda x: f"+{x:,}円" if x > 0 else f"{x:,}円" if x < 0 else "-")
         
