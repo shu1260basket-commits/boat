@@ -3,6 +3,8 @@ import pandas as pd
 import pickle
 import numpy as np
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from bs4 import BeautifulSoup
 import datetime
 import re
@@ -50,10 +52,14 @@ VENUE_1ST_BONUS = {
     "戸田": -15, "江戸川": -10, "平和島": -10, "鳴門": -5
 }
 
-# 🔥 Botブロック回避のため、User-Agentを一般的なPCブラウザに偽装
-HEADERS = {
+# 🔥 通信安定化（リトライ機構）のセットアップ
+session = requests.Session()
+# タイムアウト等で失敗した場合、最大3回（1秒間隔で）自動リトライするプロ仕様の設定
+retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+session.mount('https://', HTTPAdapter(max_retries=retries))
+session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-}
+})
 
 # 2. スクレイピング関数
 def scrape_boatrace_data_v9(target_date, venue, race_num):
@@ -69,10 +75,10 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
     env_data = {'風速': 0.0, '波高': 0.0, '会場': int(jcd), '潮': '普通'}
     
     try:
-        res_list = requests.get(url_list, headers=HEADERS, timeout=10)
+        # 🔥 timeoutを15秒に延長し、sessionを使ってリトライさせる
+        res_list = session.get(url_list, timeout=15)
         res_list.encoding = 'utf-8'
         
-        # 403 Forbiddenなどのエラーステータスを検知
         if res_list.status_code != 200:
             return None, None, False, f"通信ブロック ({res_list.status_code})"
 
@@ -111,7 +117,9 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
                 '今節調子スコア': max(0.5, (6.0 - avg_finish) / 2.0)
             }
             
-        res_before = requests.get(url_before, headers=HEADERS, timeout=10)
+        time.sleep(0.5) # 🔥 サーバーBAN対策の深呼吸（超重要）
+        
+        res_before = session.get(url_before, timeout=15)
         res_before.encoding = 'utf-8'
         soup_before = BeautifulSoup(res_before.text, 'html.parser')
         
@@ -146,7 +154,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
                     
         return boat_data, env_data, True, url_before
     except requests.exceptions.Timeout:
-        return None, None, False, "タイムアウト"
+        return None, None, False, "タイムアウト(リトライ上限)"
     except Exception as e:
         return None, None, False, f"通信エラー"
 
@@ -154,7 +162,7 @@ def fetch_actual_result(target_date, jcd, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     url = f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno={int(race_num)}&jcd={jcd}&hd={clean_date}"
     try:
-        res = requests.get(url, headers=HEADERS, timeout=10)
+        res = session.get(url, timeout=15)
         res.encoding = 'utf-8'
         if res.status_code != 200:
             return "通信ブロック", "-"
@@ -178,7 +186,6 @@ def fetch_actual_result(target_date, jcd, race_num):
 
 def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     boat_data, env_data, success, msg = scrape_boatrace_data_v9(target_date, venue, race_num)
-    # 🔥 バックテスト時でも、なぜ失敗したかの理由（msg）を返すように修正
     if not success: 
         return {"error": msg}
     
@@ -448,7 +455,6 @@ with tab2:
             res_dict = predict_race_auto_v9(bt_date, bt_venue, r_num, is_backtest=True)
             actual_result, actual_payout = fetch_actual_result(bt_date, jcd, r_num)
             
-            # 🔥 エラーの時は、表の中に直接「休催日」や「タイムアウト」の理由を表示する！
             if res_dict and "error" not in res_dict:
                 res_dict["実際の結果"] = actual_result
                 res_dict["払戻金"] = actual_payout
@@ -459,7 +465,8 @@ with tab2:
                     "race_num": f"{r_num}R", "本命": f"【失敗】 {err_msg}", "対抗": "-", "穴": "-",
                     "実際の結果": actual_result, "払戻金": actual_payout
                 })
-            time.sleep(0.5) 
+            # 🔥 リクエスト過多を避けるため、1レース終わるごとに1秒休む
+            time.sleep(1.0) 
             
         my_bar.empty()
         st.success(f"{bt_venue}全12レースのバックテストが完了しました！")
@@ -498,7 +505,8 @@ with tab3:
             def evaluate_race_for_sniper(target):
                 venue, r_num = target
                 boat_data, env_data, success, _ = scrape_boatrace_data_v9(snipe_date, venue, r_num)
-                time.sleep(0.1) 
+                # 🔥 並行アクセス時も0.3秒待機を入れてBANを回避
+                time.sleep(0.3) 
                 if not success:
                     return None
                     
@@ -538,6 +546,7 @@ with tab3:
                     }
                 return None
 
+            # 同時アクセス数は8で固定（上げすぎるとタイムアウトが増える）
             MAX_WORKERS = 8 
             
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
