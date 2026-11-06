@@ -379,7 +379,6 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
 # Streamlitの画面デザイン
 st.title("🚤 ボートレースAI【プロ舟券師ロジック・完全版】")
 
-# 🔥 タブを「予想」「バックテスト」「スナイパー」の3つに洗練
 tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 1日丸ごとバックテスト", "🎯 全国スナイパー"])
 
 today_str = datetime.datetime.now().strftime('%Y%m%d')
@@ -448,8 +447,8 @@ with tab2:
         st.dataframe(df_results, use_container_width=True)
 
 with tab3:
-    st.header("🎯 全国スナイパー（激アツ検知モード）")
-    st.write("全国のレース場を自動スキャンし、「インが弱く外が強い」「風が強い」「カドにA級がいる」など、高配当が狙える波乱レースだけをあぶり出します。")
+    st.header("🎯 全国スナイパー（波乱＆鉄板 検知モード）")
+    st.write("全国のレース場を自動スキャンし、「荒れそうな穴レース」と「堅く決まる鉄板レース」の両方をあぶり出します。")
     
     col1_sn, col2_sn = st.columns([1, 3])
     with col1_sn:
@@ -463,7 +462,7 @@ with tab3:
         
     st.caption("※対象会場が多いとスキャンに時間がかかります（1会場あたり約10秒）。")
     
-    if st.button("📡 激アツレースを探知する", type="primary"):
+    if st.button("📡 スナイパー探知を開始する", type="primary"):
         if not target_venues:
             st.error("スキャン対象の会場を1つ以上選択してください。")
         else:
@@ -484,37 +483,60 @@ with tab3:
                     if not success:
                         continue
                         
-                    reasons = []
+                    haran_reasons = []
+                    teppan_reasons = []
+                    
+                    # 🔥 波乱（穴）の探知ロジック
                     if boat_data[1]['級別'] in ['B1', 'B2']:
                         if any(boat_data[w]['級別'] in ['A1', 'A2'] for w in [2, 3, 4]):
-                            reasons.append("🚨 イン激弱（1枠B級 / 外にA級）")
+                            haran_reasons.append("🚨 イン激弱（1枠B級 / 外にA級）")
                             
                     if boat_data[3]['級別'] in ['B1', 'B2'] and boat_data[4]['級別'] in ['A1', 'A2']:
-                        reasons.append("🔥 4カドまくり特大チャンス")
+                        haran_reasons.append("🔥 4カドまくり特大チャンス")
                         
                     if env_data['風速'] >= 6.0:
-                        reasons.append(f"🌪️ 荒れ水面（風速{env_data['風速']}m）")
+                        haran_reasons.append(f"🌪️ 荒れ水面（風速{env_data['風速']}m）")
                         
                     if any(boat_data[w]['チルト'] >= 0.5 for w in [4, 5, 6]):
-                        reasons.append("🚀 アウト勢に伸び型チルトあり")
+                        haran_reasons.append("🚀 アウト勢に伸び型チルトあり")
                         
-                    if len(reasons) > 0:
+                    # 💎 鉄板（本命）の探知ロジック
+                    if boat_data[1]['級別'] == 'A1' and boat_data[1]['F'] == 0 and env_data['風速'] <= 3.0:
+                        if not any(boat_data[w]['チルト'] >= 0.5 for w in [4, 5, 6]):
+                            teppan_reasons.append("💎 イン超鉄板（1枠A1・F無・無風・アウト奇襲無）")
+                            if boat_data[2]['級別'] != 'B2':
+                                teppan_reasons.append("🛡️ 鉄壁の2コース（壁役が優秀）")
+
+                    # 表への追加
+                    if haran_reasons:
                         hot_races.append({
                             "会場": venue,
                             "R": f"{r_num}R",
-                            "激アツ理由": " ＋ ".join(reasons),
+                            "狙い目": "🔥 波乱(穴)",
+                            "探知理由": " ＋ ".join(haran_reasons),
                             "風速": f"{env_data['風速']}m",
                             "1枠": boat_data[1]['級別'],
                             "4枠": boat_data[4]['級別']
                         })
+                    elif teppan_reasons: # 波乱要素がなく、鉄板条件を満たす場合のみ
+                        hot_races.append({
+                            "会場": venue,
+                            "R": f"{r_num}R",
+                            "狙い目": "💎 鉄板(本命)",
+                            "探知理由": " ＋ ".join(teppan_reasons),
+                            "風速": f"{env_data['風速']}m",
+                            "1枠": boat_data[1]['級別'],
+                            "4枠": boat_data[4]['級別']
+                        })
+                    
                     time.sleep(0.3) 
                     
             status_text.empty()
             progress_bar.empty()
             
             if hot_races:
-                st.success(f"🎯 {len(hot_races)}件の激アツレースを探知しました！")
+                st.success(f"🎯 {len(hot_races)}件の狙い目レースを探知しました！")
                 df_hot = pd.DataFrame(hot_races)
                 st.dataframe(df_hot, use_container_width=True)
             else:
-                st.info("現在指定された会場には、目立った波乱要素のあるレースはありませんでした。")
+                st.info("現在指定された会場には、目立った狙い目（波乱・鉄板）のレースはありませんでした。")
