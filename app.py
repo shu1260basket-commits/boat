@@ -387,11 +387,9 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
     prob_sorted = sorted(final_probs, key=lambda x: x[1], reverse=True)
     
-    # 🔥 1. AI予想の上位8点を抽出
     ai_top8 = [item[0] for item in prob_sorted[:8]]
     ai_top8_probs = [item[1] for item in prob_sorted[:8]]
     
-    # 🔥 2. 黄金フォーメーション（8点）を抽出
     combined_scores = adjusted_scores_1st + adjusted_scores_2nd + adjusted_scores_3rd
     top_indices = np.argsort(combined_scores)[::-1][:4]
     t1, t2, t3, t4 = [i + 1 for i in top_indices]
@@ -404,8 +402,7 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     for third in [t3, t4]:
         form_bets.append(f"{t2}-{t1}-{third}")
         
-    # 🔥 3. 両者を結合して重複を除いた「完全16点（またはそれに近い網羅買い目）」を作成
-    total_16_bets = list(dict.fromkeys(ai_top8 + form_bets)) # 重複排除
+    total_16_bets = list(dict.fromkeys(ai_top8 + form_bets))
     
     top1_score = np.max(adjusted_scores_1st)
     top3_score = np.sort(adjusted_scores_1st)[-3]
@@ -414,8 +411,8 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     if is_backtest:
         return {
             "race_num": f"{race_num}R",
-            "本命": ai_top8[0] if not is_ken else "見送り推奨",
-            "total_16_bets": total_16_bets if not is_ken else [],
+            "本命": ai_top8[0], # 🔥 見送り推奨でも一応AIのトップ予想を出す
+            "total_16_bets": total_16_bets,
             "ai_top8_probs": ai_top8_probs,
             "is_ken": is_ken
         }
@@ -424,7 +421,7 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     result_text += f"🌪️ 水面環境: {venue} / 風速 {env_data['風速']}m / 潮: {env_data['潮']}\n\n"
     
     if is_ken:
-        result_text += "⚠️ 【見送り推奨（ケン）】\n上位の実力が拮抗しているか、水面が荒れすぎて難解なレースです。\n\n"
+        result_text += "⚠️ 【判定：見送り推奨（ケン）】\n※上位の実力が拮抗しているか水面が荒れていますが、AIの参考予想データを以下に出力します。\n\n"
     
     result_text += "📊 各艇の評価スコア内訳（1着・2着・3着それぞれのAI評価）\n"
     for i in range(1, 7):
@@ -465,29 +462,13 @@ with tab1:
     with col3:
         race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1, key="race1")
 
-    # 🔥 通常予想モードに「資金配分シミュレーター」を追加！
-    st.markdown("---")
-    st.subheader("💰 リアルタイム資金配分ツール（プロポーショナル配分）")
-    col_b1, col_b2 = st.columns(2)
-    with col_b1:
-        user_budget = st.number_input("今日の軍資金（円）", min_value=1000, max_value=100000, value=5000, step=500)
-    with col_b2:
-        st.write("※AI予想8点＋フォーメーション8点（計16点内）のAI確率を元に、どの目でも均等に近い利益が出るように100円単位で自動配分します。")
-
-    if st.button("⚡ プロの思考で予想＆資金配分！", type="primary"):
+    if st.button("⚡ プロの思考で予想！", type="primary"):
         with st.spinner("展開と気配をスコア化し、最適な資金配分を計算中..."):
             res_dict = predict_race_auto_v9(target_date, venue, race_num)
             if "error" in res_dict:
                 st.error(res_dict["error"])
             else:
                 st.text_area("AIのスコア解析結果", value=res_dict["text"], height=450)
-                
-                # 通常予想時にもAIの確率に基づいて16点に軍資金を配分表示する
-                # （仮オッズがないため、AIの予測確率の高さ＝手厚く配分するロジック）
-                st.markdown("### 💵 16点買い目・推奨投資額配分表")
-                # ここでは簡易的に確率に比例した配分（または均等に近い形）を表示
-                st.info("💡 ヒント: 下のバックテストタブでは、1日を通したリアルな回収率と収支が自動計算されます！")
-                
                 df_graph = res_dict["graph_data"]
                 fig = px.bar(
                     df_graph, x='項目', y='スコア', color='枠', 
@@ -499,7 +480,7 @@ with tab1:
                 st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    st.write("AI予想8点＋黄金フォーメーション8点（計最大16点）を網羅し、ユーザーが指定した軍資金を元に自動配分して回収率をシミュレーションします。")
+    st.write("AI予想8点＋黄金フォーメーション8点（計最大16点）を網羅し、見送り推奨レースでも予想を強制出力してバックテストを行います。")
     col1_bt, col2_bt, col3_bt = st.columns(3)
     with col1_bt:
         bt_date = st.text_input("日付 (例: 20261105)", value=today_str, key="date2")
@@ -508,7 +489,7 @@ with tab2:
     with col3_bt:
         bt_budget = st.number_input("1レースあたりの予算（円）", min_value=800, max_value=50000, value=3000, step=500, key="budget2")
         
-    st.caption("※指定された予算を、AIの確率（自信度）に合わせて各買い目に100円単位で自動配分します。")
+    st.caption("※マルチスレッド（並列処理）により1R〜12Rを超高速で一括スキャンします。")
     
     if st.button("🔄 1R〜12R 爆速バックテスト＆資金配分開始", type="primary"):
         progress_text = "バックテスト実行中..."
@@ -529,34 +510,31 @@ with tab2:
             
             if res_dict and "error" not in res_dict:
                 is_ken = res_dict["is_ken"]
-                bets = res_dict["total_16_bets"] # 🔥 AI予想8点＋フォーメーション8点の合体16点！
+                bets = res_dict["total_16_bets"]
+                pinpoint = res_dict["本命"]
                 
                 status = "-"
                 profit = 0
                 invest = 0
                 return_val = 0
                 
-                if is_ken:
-                    status = "見送り"
-                else:
-                    # 🔥 資金配分ロジック：予算（例:3000円）を各点数に割り振る（1点最低100円）
-                    num_bets = len(bets)
-                    if num_bets > 0:
-                        base_amt = max(100, (bt_budget // num_bets // 100) * 100)
-                        invest = base_amt * num_bets
-                        
-                        if actual_result in bets:
-                            status = "🎯 的中！"
-                            # 的中時の払戻金計算（100円あたりの払戻金 × 投資単位）
-                            return_val = int(actual_payout_val * (base_amt / 100))
-                            profit = return_val - invest
-                        else:
-                            status = "❌ ハズレ"
-                            profit = -invest
+                # 🔥 見送り推奨であっても、予想を放棄せずケンマークをつけて買い目を回す
+                num_bets = len(bets)
+                if num_bets > 0:
+                    base_amt = max(100, (bt_budget // num_bets // 100) * 100)
+                    invest = base_amt * num_bets
                     
+                    if actual_result in bets:
+                        status = "🎯 的中！" if not is_ken else "⚠️ ケン的中！"
+                        return_val = int(actual_payout_val * (base_amt / 100))
+                        profit = return_val - invest
+                    else:
+                        status = "❌ ハズレ" if not is_ken else "⚠️ ケン外れ"
+                        profit = -invest
+                
                 return {
                     "R": f"{r_num}R", 
-                    "AI本命(1点)": res_dict["本命"],
+                    "AI本命(1点)": pinpoint,
                     "買い目(最大16点)": f"{len(bets)}点買い",
                     "実際の結果": actual_result, 
                     "払戻金(100円)": f"¥{actual_payout_val:,}" if actual_payout_val > 0 else "-",
