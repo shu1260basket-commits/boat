@@ -379,7 +379,8 @@ def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
 # Streamlitの画面デザイン
 st.title("🚤 ボートレースAI【プロ舟券師ロジック・完全版】")
 
-tab1, tab2, tab3, tab4 = st.tabs(["🚤 通常予想モード", "📊 1日丸ごとバックテスト", "🧠 AI自己進化", "🎯 全国スナイパー"])
+# 🔥 タブを「予想」「バックテスト」「スナイパー」の3つに洗練
+tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 1日丸ごとバックテスト", "🎯 全国スナイパー"])
 
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
@@ -447,42 +448,6 @@ with tab2:
         st.dataframe(df_results, use_container_width=True)
 
 with tab3:
-    st.header("🧠 AI自己進化（Nightly Retraining）")
-    st.write("過去のレース結果を再学習し、AIがどのデータを重視するようになったか（特徴量重要度）の変化を可視化します。")
-    
-    col1_tr, col2_tr = st.columns(2)
-    with col1_tr:
-        train_date = st.text_input("学習対象の日付", value="20261104", key="date3")
-    with col2_tr:
-        train_venue = st.selectbox("学習対象の会場", options=["全国一括（全24場）"] + list(VENUE_MAP.keys()), index=0, key="venue3")
-        
-    if st.button("🧬 新しいレース結果をAIに学習させる", type="primary"):
-        with st.spinner(f"{train_date} の結果を収集し、LightGBMの重みを更新・比較中..."):
-            time.sleep(1.5)
-            st.info("🌐 レース結果データ（1着〜3着）のスクレイピング完了...")
-            time.sleep(1.5)
-            st.info("🧠 LightGBMブースターに追加学習を実行中...")
-            time.sleep(1.5)
-            st.success("✨ 学習完了！ 特徴量重要度（予測に使うデータの優先度）が以下のように変化しました。")
-            
-            features = ['1コース勝率', 'モーター2連率', '平均ST', '展示タイム', '展開(カドまくり等)', '風速影響']
-            importance_before = [150, 110, 85, 90, 130, 45]
-            importance_after = [142, 125, 82, 98, 145, 55] 
-            
-            df_imp = pd.DataFrame({
-                '予測ファクター': features * 2,
-                '重要度スコア': importance_before + importance_after,
-                'バージョン': ['学習前 (v9.0)']*6 + ['学習後 (v9.1)']*6
-            })
-            fig_imp = px.bar(
-                df_imp, x='予測ファクター', y='重要度スコア', color='バージョン', 
-                barmode='group', template='plotly_dark',
-                color_discrete_sequence=['#888888', '#00ffcc']
-            )
-            fig_imp.update_layout(title="📈 学習ビフォーアフター：AIが重視するポイントの変化")
-            st.plotly_chart(fig_imp, use_container_width=True)
-
-with tab4:
     st.header("🎯 全国スナイパー（激アツ検知モード）")
     st.write("全国のレース場を自動スキャンし、「インが弱く外が強い」「風が強い」「カドにA級がいる」など、高配当が狙える波乱レースだけをあぶり出します。")
     
@@ -490,7 +455,6 @@ with tab4:
     with col1_sn:
         snipe_date = st.text_input("スキャン日付", value=today_str, key="date4")
     with col2_sn:
-        # デフォルトでは処理時間短縮のため、いくつかの場をプリセット選択
         target_venues = st.multiselect(
             "スキャン対象の会場（複数選択可）", 
             options=list(VENUE_MAP.keys()), 
@@ -516,26 +480,21 @@ with tab4:
                     status_text.text(f"📡 スキャン中... {venue} {r_num}R ({scan_count}/{total_scans})")
                     progress_bar.progress(scan_count / total_scans)
                     
-                    # 出走表データのみを軽量スクレイピング
                     boat_data, env_data, success, _ = scrape_boatrace_data_v9(snipe_date, venue, r_num)
                     if not success:
                         continue
                         
                     reasons = []
-                    # 激アツ条件1: イン弱・外強（1枠がB級で、外にA級がいる）
                     if boat_data[1]['級別'] in ['B1', 'B2']:
                         if any(boat_data[w]['級別'] in ['A1', 'A2'] for w in [2, 3, 4]):
                             reasons.append("🚨 イン激弱（1枠B級 / 外にA級）")
                             
-                    # 激アツ条件2: 4カド特大まくり（3枠がB級の壁なし状態＋4枠がA級）
                     if boat_data[3]['級別'] in ['B1', 'B2'] and boat_data[4]['級別'] in ['A1', 'A2']:
                         reasons.append("🔥 4カドまくり特大チャンス")
                         
-                    # 激アツ条件3: 水面大荒れ（強風または波高）
                     if env_data['風速'] >= 6.0:
                         reasons.append(f"🌪️ 荒れ水面（風速{env_data['風速']}m）")
                         
-                    # 激アツ条件4: アウトの伸び型チルト
                     if any(boat_data[w]['チルト'] >= 0.5 for w in [4, 5, 6]):
                         reasons.append("🚀 アウト勢に伸び型チルトあり")
                         
@@ -548,7 +507,7 @@ with tab4:
                             "1枠": boat_data[1]['級別'],
                             "4枠": boat_data[4]['級別']
                         })
-                    time.sleep(0.3) # サーバー負荷軽減
+                    time.sleep(0.3) 
                     
             status_text.empty()
             progress_bar.empty()
