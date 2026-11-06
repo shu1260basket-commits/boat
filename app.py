@@ -9,7 +9,7 @@ import re
 import itertools
 import time
 import plotly.express as px
-import concurrent.futures # 🔥 並列処理（マルチスレッド）用のライブラリを追加
+import concurrent.futures 
 
 # ページの基本設定
 st.set_page_config(page_title="ボートレースAI【プロ舟券師ロジック・最終進化版】", layout="wide")
@@ -50,11 +50,15 @@ VENUE_1ST_BONUS = {
     "戸田": -15, "江戸川": -10, "平和島": -10, "鳴門": -5
 }
 
+# 🔥 Botブロック回避のため、User-Agentを一般的なPCブラウザに偽装
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+}
+
 # 2. スクレイピング関数
 def scrape_boatrace_data_v9(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
-    headers = {'User-Agent': 'Mozilla/5.0'}
     
     base_url = "https://www.boatrace.jp/owpc/pc/race"
     params = f"?rno={int(race_num)}&jcd={jcd}&hd={clean_date}"
@@ -65,13 +69,18 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
     env_data = {'風速': 0.0, '波高': 0.0, '会場': int(jcd), '潮': '普通'}
     
     try:
-        res_list = requests.get(url_list, headers=headers, timeout=10)
+        res_list = requests.get(url_list, headers=HEADERS, timeout=10)
         res_list.encoding = 'utf-8'
+        
+        # 403 Forbiddenなどのエラーステータスを検知
+        if res_list.status_code != 200:
+            return None, None, False, f"通信ブロック ({res_list.status_code})"
+
         soup_list = BeautifulSoup(res_list.text, 'html.parser')
         
         tbodies_list = soup_list.find_all('tbody', class_='is-fs12')
         if len(tbodies_list) < 6:
-            return None, None, False, f"出走表未公開"
+            return None, None, False, "休催日 または データ未公開"
             
         for waku, tbody in enumerate(tbodies_list[:6], 1):
             text_data = tbody.text.replace('\n', ' ').replace('\r', ' ')
@@ -102,7 +111,7 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
                 '今節調子スコア': max(0.5, (6.0 - avg_finish) / 2.0)
             }
             
-        res_before = requests.get(url_before, headers=headers, timeout=10)
+        res_before = requests.get(url_before, headers=HEADERS, timeout=10)
         res_before.encoding = 'utf-8'
         soup_before = BeautifulSoup(res_before.text, 'html.parser')
         
@@ -136,15 +145,20 @@ def scrape_boatrace_data_v9(target_date, venue, race_num):
                     boat_data[actual_waku]['進入コース'] = i + 1
                     
         return boat_data, env_data, True, url_before
+    except requests.exceptions.Timeout:
+        return None, None, False, "タイムアウト"
     except Exception as e:
-        return None, None, False, f"読込失敗: {str(e)}"
+        return None, None, False, f"通信エラー"
 
 def fetch_actual_result(target_date, jcd, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     url = f"https://www.boatrace.jp/owpc/pc/race/raceresult?rno={int(race_num)}&jcd={jcd}&hd={clean_date}"
     try:
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=10)
+        res = requests.get(url, headers=HEADERS, timeout=10)
         res.encoding = 'utf-8'
+        if res.status_code != 200:
+            return "通信ブロック", "-"
+            
         soup = BeautifulSoup(res.text, 'html.parser')
         
         trs = soup.find_all('tr')
@@ -156,13 +170,17 @@ def fetch_actual_result(target_date, jcd, race_num):
                     payout_str = tds[2].text.strip().replace('\r', '').replace('\n', '').replace(' ', '')
                     if payout_str and payout_str != "円": payout_str += "円"
                     return result_str, payout_str
-        return "未確定", "-"
+        return "データなし(休催等)", "-"
+    except requests.exceptions.Timeout:
+        return "タイムアウト", "-"
     except:
-        return "エラー", "-"
+        return "通信エラー", "-"
 
 def predict_race_auto_v9(target_date, venue, race_num, is_backtest=False):
     boat_data, env_data, success, msg = scrape_boatrace_data_v9(target_date, venue, race_num)
-    if not success: return {"error": msg} if not is_backtest else None
+    # 🔥 バックテスト時でも、なぜ失敗したかの理由（msg）を返すように修正
+    if not success: 
+        return {"error": msg}
     
     input_dict = {'会場': env_data['会場'], '風速': env_data['風速'], '波高': env_data['波高']}
     
@@ -430,13 +448,15 @@ with tab2:
             res_dict = predict_race_auto_v9(bt_date, bt_venue, r_num, is_backtest=True)
             actual_result, actual_payout = fetch_actual_result(bt_date, jcd, r_num)
             
-            if res_dict:
+            # 🔥 エラーの時は、表の中に直接「休催日」や「タイムアウト」の理由を表示する！
+            if res_dict and "error" not in res_dict:
                 res_dict["実際の結果"] = actual_result
                 res_dict["払戻金"] = actual_payout
                 results.append(res_dict)
             else:
+                err_msg = res_dict["error"] if res_dict else "データ未公開"
                 results.append({
-                    "race_num": f"{r_num}R", "本命": "データ未公開", "対抗": "-", "穴": "-",
+                    "race_num": f"{r_num}R", "本命": f"【失敗】 {err_msg}", "対抗": "-", "穴": "-",
                     "実際の結果": actual_result, "払戻金": actual_payout
                 })
             time.sleep(0.5) 
@@ -471,23 +491,20 @@ with tab3:
             progress_bar = st.progress(0)
             status_text = st.empty()
             
-            # 全対象レースのリストを作成
             race_targets = [(venue, r_num) for venue in target_venues for r_num in range(1, 13)]
             total_scans = len(race_targets)
             scan_count = 0
             
-            # 1レース分の評価を行う関数（並列処理用）
             def evaluate_race_for_sniper(target):
                 venue, r_num = target
                 boat_data, env_data, success, _ = scrape_boatrace_data_v9(snipe_date, venue, r_num)
-                time.sleep(0.1) # サーバーへの優しさ（IPBAN対策）
+                time.sleep(0.1) 
                 if not success:
                     return None
                     
                 haran_reasons = []
                 teppan_reasons = []
                 
-                # 🔥 波乱（穴）の探知ロジック
                 if boat_data[1]['級別'] in ['B1', 'B2']:
                     if any(boat_data[w]['級別'] in ['A1', 'A2'] for w in [2, 3, 4]):
                         haran_reasons.append("🚨 イン激弱（1枠B級 / 外にA級）")
@@ -501,7 +518,6 @@ with tab3:
                 if any(boat_data[w]['チルト'] >= 0.5 for w in [4, 5, 6]):
                     haran_reasons.append("🚀 アウト勢に伸び型チルトあり")
                     
-                # 💎 鉄板（本命）の探知ロジック
                 if boat_data[1]['級別'] == 'A1' and boat_data[1]['F'] == 0 and env_data['風速'] <= 3.0:
                     if not any(boat_data[w]['チルト'] >= 0.5 for w in [4, 5, 6]):
                         teppan_reasons.append("💎 イン超鉄板（1枠A1・F無・無風・アウト奇襲無）")
@@ -522,14 +538,10 @@ with tab3:
                     }
                 return None
 
-            # 🔥 マルチスレッド（並列処理）で爆速スキャン実行
-            MAX_WORKERS = 8 # 同時通信数（上げすぎると公式からBANされるので8が限界値）
+            MAX_WORKERS = 8 
             
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                # 全レースのタスクを一気に送信
                 futures = {executor.submit(evaluate_race_for_sniper, t): t for t in race_targets}
-                
-                # 完了したものから順次処理
                 for future in concurrent.futures.as_completed(futures):
                     scan_count += 1
                     status_text.text(f"📡 スキャン中... 完了 {scan_count}/{total_scans} レース")
@@ -545,11 +557,8 @@ with tab3:
             if hot_races:
                 st.success(f"🎯 {len(hot_races)}件の狙い目レースを探知しました！")
                 df_hot = pd.DataFrame(hot_races)
-                
-                # 並列処理だと順番がバラバラになるので、「会場」と「レース番号」で綺麗に並び替える
                 df_hot['R_num'] = df_hot['R'].str.replace('R', '').astype(int)
                 df_hot = df_hot.sort_values(by=['会場', 'R_num']).drop(columns=['R_num']).reset_index(drop=True)
-                
                 st.dataframe(df_hot, use_container_width=True)
             else:
                 st.info("現在指定された会場には、目立った狙い目（波乱・鉄板）のレースはありませんでした。")
