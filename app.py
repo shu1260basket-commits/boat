@@ -172,7 +172,7 @@ def fetch_actual_result(target_date, jcd, race_num):
             if '3連単' in tr.text:
                 tds = tr.find_all('td')
                 if len(tds) >= 3:
-                    # 🔥【完全修正】数字だけを綺麗に抜き出して「1-2-3」の形に強制フォーマットする！
+                    # 結果（例: 1-2-3の数字抽出）
                     raw_text = tds[1].text.strip()
                     digits = re.findall(r'[1-6]', raw_text)
                     if len(digits) >= 3:
@@ -180,9 +180,24 @@ def fetch_actual_result(target_date, jcd, race_num):
                     else:
                         result_str = raw_text
                         
-                    payout_str = tds[2].text.strip().replace('\r', '').replace('\n', '').replace(' ', '').replace('円', '').replace(',', '')
-                    payout_val = int(payout_str) if payout_str.isdigit() else 0
+                    # 🔥【完全強化】払戻金テキストから数値のみを頑健に抽出する
+                    payout_cell_text = tds[2].text
+                    # カンマを除去し、数字の連続を正規表現で探す
+                    clean_payout_text = payout_cell_text.replace(',', '')
+                    numbers = re.findall(r'\d+', clean_payout_text)
+                    
+                    payout_val = 0
+                    if numbers:
+                        # 払戻金として最も妥当な数値（通常一番大きいか、金額に相当するもの）を取得
+                        # 一般的にボートレースの払戻金は100円単位以上なので、見つかった数字のうち最大のものを採用するか、先頭を採用
+                        payout_candidates = [int(n) for n in numbers if int(n) >= 100]
+                        if payout_candidates:
+                            payout_val = max(payout_candidates)
+                        else:
+                            payout_val = int(numbers[0])
+
                     return result_str, payout_val
+                    
         return "データなし(休催等)", 0
     except requests.exceptions.Timeout:
         return "タイムアウト", 0
@@ -460,7 +475,7 @@ with tab1:
                 st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    st.write("AIが提案する「黄金フォーメーション（計8点）」が実際に当たっていたか、回収率は何％かを自動計算します。")
+    st.write("AIが提案する公式の「黄金フォーメーション（計8点）」が実際に当たっていたか、払戻金や回収率は何％かを自動計算します。")
     col1_bt, col2_bt = st.columns(2)
     with col1_bt:
         bt_date = st.text_input("日付 (例: 20261105)", value=today_str, key="date2")
@@ -507,7 +522,7 @@ with tab2:
                     
                 return {
                     "R": f"{r_num}R", 
-                    "買い目(8点)": ", ".join(bets),
+                    "買い目(8点)": ", ".join(bets) if bets else "見送り",
                     "実際の結果": actual_result, 
                     "払戻金": f"¥{actual_payout_val:,}" if actual_payout_val > 0 else "-",
                     "判定": status,
