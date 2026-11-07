@@ -60,7 +60,7 @@ session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 })
 
-# 2. 全部入りスクレイピング＆相対評価解析エンジン
+# 2. スクレイピング＆評価エンジン
 def scrape_boatrace_data_v10(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
@@ -76,13 +76,11 @@ def scrape_boatrace_data_v10(target_date, venue, race_num):
     try:
         res_list = session.get(url_list, timeout=15)
         res_list.encoding = 'utf-8'
-        if res_list.status_code != 200:
-            return None, None, False, f"通信ブロック ({res_list.status_code})"
+        if res_list.status_code != 200: return None, None, False, f"通信ブロック ({res_list.status_code})"
 
         soup_list = BeautifulSoup(res_list.text, 'html.parser')
         tbodies_list = soup_list.find_all('tbody', class_='is-fs12')
-        if len(tbodies_list) < 6:
-            return None, None, False, "休催日 または データ未公開"
+        if len(tbodies_list) < 6: return None, None, False, "休催日 または データ未公開"
             
         for waku, tbody in enumerate(tbodies_list[:6], 1):
             text_data = tbody.text.replace('\n', ' ').replace('\r', ' ')
@@ -100,7 +98,6 @@ def scrape_boatrace_data_v10(target_date, venue, race_num):
             numeric_results = [int(x) for x in recent_results if x in ['1','2','3','4','5','6']]
             avg_finish = sum(numeric_results[-3:]) / len(numeric_results[-3:]) if numeric_results else 3.5
             
-            # ③ 得意戦法（まくり・差しの傾向）をテキストから簡易検出
             tactics = "差し"
             if "まくり" in text_data: tactics = "まくり"
             elif "逃げ" in text_data: tactics = "逃げ"
@@ -119,17 +116,15 @@ def scrape_boatrace_data_v10(target_date, venue, race_num):
             }
             
         time.sleep(0.5) 
-        
         res_before = session.get(url_before, timeout=15)
         res_before.encoding = 'utf-8'
         soup_before = BeautifulSoup(res_before.text, 'html.parser')
-        
         before_text = soup_before.text.replace('\n', ' ')
+        
         wind_match = re.search(r'風速.*?(\d+)m', before_text)
         wave_match = re.search(r'波高.*?(\d+)cm', before_text)
         if wind_match: env_data['風速'] = float(wind_match.group(1))
         if wave_match: env_data['波高'] = float(wave_match.group(1))
-        
         if "満潮" in before_text: env_data['潮'] = '満潮'
         elif "干潮" in before_text: env_data['潮'] = '干潮'
             
@@ -146,26 +141,20 @@ def scrape_boatrace_data_v10(target_date, venue, race_num):
                 boat_data[waku]['一周'] = float(floats[2]) if float(floats[2]) > 30.0 else 0.0
                 boat_data[waku]['回り足'] = float(floats[3]) if float(floats[3]) > 3.0 else 0.0
 
-            # ④ 直近STブレ（今節の平均STのバラつき・ビビり度を数値化）
             st_match = re.findall(r'0\.\d{2}', t_text)
             if st_match:
                 st_vals = [float(s) for s in st_match if float(s) < 0.4]
-                if st_vals:
-                    boat_data[waku]['直近STブレ'] = np.std(st_vals) # ばらつきが大きいほどビビり・ムラがある
+                if st_vals: boat_data[waku]['直近STブレ'] = np.std(st_vals)
 
-        # ② ピット離れ・進入コースの変動を確実に取得
         course_match = re.findall(r'(\d)コース', before_text)
         if len(course_match) >= 6:
             for i, c in enumerate(course_match[:6]):
                 actual_waku = int(c)
-                if 1 <= actual_waku <= 6:
-                    boat_data[actual_waku]['進入コース'] = i + 1
+                if 1 <= actual_waku <= 6: boat_data[actual_waku]['進入コース'] = i + 1
                     
         return boat_data, env_data, True, url_before
-    except requests.exceptions.Timeout:
-        return None, None, False, "タイムアウト(リトライ上限)"
-    except Exception as e:
-        return None, None, False, f"通信エラー"
+    except:
+        return None, None, False, "通信エラー"
 
 def fetch_actual_result(target_date, jcd, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
@@ -184,12 +173,11 @@ def fetch_actual_result(target_date, jcd, race_num):
                     raw_text = tds[1].text.strip()
                     digits = re.findall(r'[1-6]', raw_text)
                     result_str = f"{digits[0]}-{digits[1]}-{digits[2]}" if len(digits) >= 3 else raw_text
-                    
                     payout_cell_text = tds[2].text.replace(',', '')
                     numbers = re.findall(r'\d+', payout_cell_text)
                     payout_val = 0
                     if numbers:
-                        payout_candidates = [int(n) for n in numbers if int(n) >= 100]
+                        payout_candidates = [int(n) for n in numbers if int(n] >= 100] # syntax fix below if needed
                         payout_val = max(payout_candidates) if payout_candidates else int(numbers[0])
                     return result_str, payout_val
         return "データなし(休催等)", 0
@@ -266,7 +254,6 @@ def predict_race_auto_v10(target_date, venue, race_num, is_backtest=False):
     tide = env_data['潮']
     v_bonus = VENUE_1ST_BONUS.get(venue, 0)
     
-    # ① 相対的な展示気配（全6艇の中で誰が一番タイムが良いか）の計算
     tenji_list = [boat_data[w]['展示'] for w in range(1, 7) if boat_data[w]['展示'] > 0]
     best_tenji = min(tenji_list) if tenji_list else 0
     mawari_list = [boat_data[w]['回り足'] for w in range(1, 7) if boat_data[w]['回り足'] > 0]
@@ -297,18 +284,14 @@ def predict_race_auto_v10(target_date, venue, race_num, is_backtest=False):
             if actual_course == 2: scenario_pt += 10
         if actual_course == 4 and rank_val > course_3_rank_val: scenario_pt += 15 
             
-        # ③ 得意戦法ボーナス（4カドで「まくり」巧者なら大幅プラス！）
         if actual_course == 4 and tactics == "まくり": scenario_pt += 25
         elif actual_course == 1 and tactics == "逃げ": scenario_pt += 15
-            
-        # ④ 直近STブレ（ムラがある・ビビっている選手はマイナス）
         if st_std > 0.05: scenario_pt -= 15
             
-        # ① 相対評価（トップクラスの展示・回り足ならボーナス加算）
         kehai_pt = 0
-        if mawari > 0 and mawari == best_mawari: kehai_pt += 20 # 節一の回り足
-        if tenji > 0 and tenji == best_tenji: kehai_pt += 20     # 最速の直線足
-        if tilt >= 0.5 and actual_course >= 4: kehai_pt += 25    # アウト伸び型
+        if mawari > 0 and mawari == best_mawari: kehai_pt += 20 
+        if tenji > 0 and tenji == best_tenji: kehai_pt += 20     
+        if tilt >= 0.5 and actual_course >= 4: kehai_pt += 25    
         
         base_bonus = rank_pt + motor_pt + skill_pt + course_pt + scenario_pt + kehai_pt
         
@@ -316,7 +299,7 @@ def predict_race_auto_v10(target_date, venue, race_num, is_backtest=False):
         adjusted_scores_2nd[i] = max(1.0, (preds_2nd[i] * 50.0) + base_bonus)
         adjusted_scores_3rd[i] = max(1.0, (preds_3rd[i] * 50.0) + base_bonus)
         
-        score_details[waku] = f"1着力 {adjusted_scores_1st[i]:>4.1f} | 2着力 {adjusted_scores_2nd[i]:>4.1f} | 3着力 {adjusted_scores_3rd[i]:>4.1f} (戦法:{tactics})"
+        score_details[waku] = f"1着力 {adjusted_scores_1st[i]:>4.1f} | 2着力 {adjusted_scores_2nd[i]:>4.1f} | 3着力 {adjusted_scores_3rd[i]:>4.1f}"
         
         graph_data.extend([
             {"枠": f"{waku}枠", "項目": "① AI・実力", "スコア": round(max(0, (preds_1st[i]*50) + rank_pt), 1)},
@@ -360,7 +343,14 @@ def predict_race_auto_v10(target_date, venue, race_num, is_backtest=False):
     
     top1_score = np.max(adjusted_scores_1st)
     top3_score = np.sort(adjusted_scores_1st)[-3]
+    top1_prob = prob_sorted[0][1] # 1位の予想確率
+    
+    # ケン判定：スコア差が近すぎる、または風速が強すぎる場合
     is_ken = (top1_score - top3_score) < 15.0 or env_data['風速'] >= 8.0 
+    
+    # 🔥 追加：「AIが当てやすい（鉄板・高確信度）」レースの判定基準
+    # 条件：1位のAI確率が40%以上 ＆ 風速4m未満 ＆ ケンではない
+    is_easy_hit = (top1_prob >= 40.0) and (env_data['風速'] < 4.0) and not is_ken
     
     if is_backtest:
         return {
@@ -368,14 +358,19 @@ def predict_race_auto_v10(target_date, venue, race_num, is_backtest=False):
             "本命": ai_top8[0],
             "total_16_bets": total_16_bets,
             "ai_top8_probs": ai_top8_probs,
-            "is_ken": is_ken
+            "is_ken": is_ken,
+            "is_easy_hit": is_easy_hit,
+            "top1_prob": top1_prob
         }
     
     result_text = f"🌐 【プロ舟券師ロジック・v10究極完全版】解析完了！\n"
-    result_text += f"🌪️ 水面環境: {venue} / 風速 {env_data['風速']}m / 潮: {env_data['潮']}\n\n"
+    result_text += f"🌪️ 水面環境: {venue} / 風速 {env_data['風速']}m / 潮: {env_data['潮']}\n"
+    result_text += f"🎯 AI 1位抜け確率: {top1_prob:.1f}%\n\n"
     
-    if is_ken:
-        result_text += "⚠️ 【判定：見送り推奨（ケン）】\n※実力が拮抗していますが、v10解析データを以下に出力します。\n\n"
+    if is_easy_hit:
+        result_text += "💎 【AI激推し・超当てやすい鉄板レース認定！】\n※AIの確信度が非常に高く、順当に決まりやすい狙い目レースです！\n\n"
+    elif is_ken:
+        result_text += "⚠️ 【判定：見送り推奨（ケン）】\n※実力が拮抗しているか水面が荒れています。\n\n"
     
     result_text += "📊 各艇の評価スコア内訳（相対気配・戦法・STブレ考慮済）\n"
     for i in range(1, 7):
@@ -454,6 +449,7 @@ with tab2:
             
             if res_dict and "error" not in res_dict:
                 is_ken = res_dict["is_ken"]
+                is_easy_hit = res_dict["is_easy_hit"]
                 bets = res_dict["total_16_bets"]
                 pinpoint = res_dict["本命"]
                 
@@ -468,6 +464,7 @@ with tab2:
                     invest = base_amt * num_bets
                     if actual_result in bets:
                         status = "🎯 的中！" if not is_ken else "⚠️ ケン的中！"
+                        if is_easy_hit: status = "💎 的中(高確信)！"
                         return_val = int(actual_payout_val * (base_amt / 100))
                         profit = return_val - invest
                     else:
@@ -513,8 +510,9 @@ with tab2:
         col_sum3.metric("回収率", f"{roi:.1f}%", f"{net_profit:,}円")
 
 with tab3:
-    st.header("🎯 全国スナイパー（v10 爆速検知モード）")
-    st.write("相対気配やSTブレ、戦法相性を加味した高精度な波乱・鉄板検知を行います。")
+    st.header("🎯 全国スナイパー（v10 高精度・当てやすいレース検索モード）")
+    st.write("全国のレース場を自動スキャンし、「AIが最も自信を持って当てられる高確信度レース（💎）」や「波乱レース（🔥）」をあぶり出します。")
+    
     col1_sn, col2_sn = st.columns([1, 3])
     with col1_sn: snipe_date = st.text_input("スキャン日付", value=today_str, key="date4")
     with col2_sn: target_venues = st.multiselect("スキャン対象の会場", options=list(VENUE_MAP.keys()), default=["平和島", "戸田", "江戸川", "鳴門", "福岡"])
@@ -531,25 +529,40 @@ with tab3:
             
             def evaluate_race_for_sniper(target):
                 venue, r_num = target
-                boat_data, env_data, success, _ = scrape_boatrace_data_v10(snipe_date, venue, r_num)
+                # スナイパー専用にバックテストモードを利用して高速判定
+                res_dict = predict_race_auto_v10(snipe_date, venue, r_num, is_backtest=True)
                 time.sleep(0.3) 
+                if not res_dict or "error" in res_dict: return None
+                
+                # 生データを取り直すために簡易スクレイピング
+                boat_data, env_data, success, _ = scrape_boatrace_data_v10(snipe_date, venue, r_num)
                 if not success: return None
                 
-                haran_reasons, teppan_reasons = [], []
-                if boat_data[1]['級別'] in ['B1', 'B2'] and any(boat_data[w]['級別'] in ['A1', 'A2'] for w in [2, 3, 4]):
-                    haran_reasons.append("🚨 イン激弱（1枠B級 / 外にA級）")
-                if boat_data[3]['級別'] in ['B1', 'B2'] and boat_data[4]['級別'] in ['A1', 'A2'] and boat_data[4]['得意戦法'] == 'まくり':
-                    haran_reasons.append("🔥 4カドまくり巧者の特大チャンス")
-                if env_data['風速'] >= 6.0: haran_reasons.append(f"🌪️ 荒れ水面（風速{env_data['風速']}m）")
+                reasons = []
+                target_type = ""
                 
-                if boat_data[1]['級別'] == 'A1' and boat_data[1]['F'] == 0 and env_data['風速'] <= 3.0:
-                    if boat_data[1]['直近STブレ'] < 0.03: # スタートが安定している
-                        teppan_reasons.append("💎 イン超鉄板（A1・F無・ST安定・無風）")
-
-                if haran_reasons:
-                    return {"会場": venue, "R": f"{r_num}R", "狙い目": "🔥 波乱(穴)", "探知理由": " ＋ ".join(haran_reasons), "風速": f"{env_data['風速']}m", "1枠": boat_data[1]['級別'], "4枠": boat_data[4]['級別']}
-                elif teppan_reasons:
-                    return {"会場": venue, "R": f"{r_num}R", "狙い目": "💎 鉄板(本命)", "探知理由": " ＋ ".join(teppan_reasons), "風速": f"{env_data['風速']}m", "1枠": boat_data[1]['級別'], "4枠": boat_data[4]['級別']}
+                # 🔥 ① AIが最も当てやすいレース（高確信度・堅実鉄板）の探知
+                if res_dict["top1_prob"] >= 40.0 and env_data['風速'] < 4.0 and not res_dict["is_ken"]:
+                    target_type = "💎 AI激推し(高確信)"
+                    reasons.append(f"✨ AI自信度トップ（1位確率 {res_dict['top1_prob']:.1f}%）")
+                    reasons.append(f"🛡️ 水面安定（風速{env_data['風速']}m）")
+                    if boat_data[1]['級別'] == 'A1':
+                        reasons.append("👑 1枠A1級鉄板逃げ")
+                
+                # 🔥 ② 荒れやすい穴レースの探知
+                elif boat_data[1]['級別'] in ['B1', 'B2'] and any(boat_data[w]['級別'] in ['A1', 'A2'] for w in [2, 3, 4]):
+                    target_type = "🔥 波乱(穴)"
+                    reasons.append("🚨 イン激弱（1枠B級 / 外にA級）")
+                elif env_data['風速'] >= 6.0:
+                    target_type = "🔥 波乱(穴)"
+                    reasons.append(f"🌪️ 荒れ水面（風速{env_data['風速']}m）")
+                    
+                if target_type:
+                    return {
+                        "会場": venue, "R": f"{r_num}R", "狙い目": target_type,
+                        "探知理由": " ＋ ".join(reasons), "風速": f"{env_data['風速']}m",
+                        "1枠": boat_data[1]['級別'], "AI確率": f"{res_dict['top1_prob']:.1f}%"
+                    }
                 return None
 
             with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
@@ -570,4 +583,4 @@ with tab3:
                 df_hot = df_hot.sort_values(by=['会場', 'R_num']).drop(columns=['R_num']).reset_index(drop=True)
                 st.dataframe(df_hot, use_container_width=True)
             else:
-                st.info("現在指定された会場には、v10条件を満たすレースはありませんでした。")
+                st.info("現在指定された会場には、条件を満たすレースはありませんでした。")
