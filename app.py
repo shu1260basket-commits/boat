@@ -173,11 +173,12 @@ def fetch_actual_result(target_date, jcd, race_num):
                     raw_text = tds[1].text.strip()
                     digits = re.findall(r'[1-6]', raw_text)
                     result_str = f"{digits[0]}-{digits[1]}-{digits[2]}" if len(digits) >= 3 else raw_text
+                    
                     payout_cell_text = tds[2].text.replace(',', '')
                     numbers = re.findall(r'\d+', payout_cell_text)
                     payout_val = 0
                     if numbers:
-                        payout_candidates = [int(n) for n in numbers if int(n] >= 100] # syntax fix below if needed
+                        payout_candidates = [int(n) for n in numbers if int(n) >= 100]
                         payout_val = max(payout_candidates) if payout_candidates else int(numbers[0])
                     return result_str, payout_val
         return "データなし(休催等)", 0
@@ -343,13 +344,9 @@ def predict_race_auto_v10(target_date, venue, race_num, is_backtest=False):
     
     top1_score = np.max(adjusted_scores_1st)
     top3_score = np.sort(adjusted_scores_1st)[-3]
-    top1_prob = prob_sorted[0][1] # 1位の予想確率
+    top1_prob = prob_sorted[0][1]
     
-    # ケン判定：スコア差が近すぎる、または風速が強すぎる場合
     is_ken = (top1_score - top3_score) < 15.0 or env_data['風速'] >= 8.0 
-    
-    # 🔥 追加：「AIが当てやすい（鉄板・高確信度）」レースの判定基準
-    # 条件：1位のAI確率が40%以上 ＆ 風速4m未満 ＆ ケンではない
     is_easy_hit = (top1_prob >= 40.0) and (env_data['風速'] < 4.0) and not is_ken
     
     if is_backtest:
@@ -370,7 +367,7 @@ def predict_race_auto_v10(target_date, venue, race_num, is_backtest=False):
     if is_easy_hit:
         result_text += "💎 【AI激推し・超当てやすい鉄板レース認定！】\n※AIの確信度が非常に高く、順当に決まりやすい狙い目レースです！\n\n"
     elif is_ken:
-        result_text += "⚠️ 【判定：見送り推奨（ケン）】\n※実力が拮抗しているか水面が荒れています。\n\n"
+        result_text += "⚠️ 【判定：見送り推奨（ケン）】\n※実力が拮抗していますが、v10解析データを以下に出力します。\n\n"
     
     result_text += "📊 各艇の評価スコア内訳（相対気配・戦法・STブレ考慮済）\n"
     for i in range(1, 7):
@@ -511,7 +508,7 @@ with tab2:
 
 with tab3:
     st.header("🎯 全国スナイパー（v10 高精度・当てやすいレース検索モード）")
-    st.write("全国のレース場を自動スキャンし、「AIが最も自信を持って当てられる高確信度レース（💎）」や「波乱レース（🔥）」をあぶり出します。")
+    st.write("全国のレース場を自動スキャンし、「AIが最も自信を持って当てられる高確信度レース（💎）」や多様な狙い目レースをあぶり出します。")
     
     col1_sn, col2_sn = st.columns([1, 3])
     with col1_sn: snipe_date = st.text_input("スキャン日付", value=today_str, key="date4")
@@ -529,19 +526,16 @@ with tab3:
             
             def evaluate_race_for_sniper(target):
                 venue, r_num = target
-                # スナイパー専用にバックテストモードを利用して高速判定
                 res_dict = predict_race_auto_v10(snipe_date, venue, r_num, is_backtest=True)
                 time.sleep(0.3) 
                 if not res_dict or "error" in res_dict: return None
                 
-                # 生データを取り直すために簡易スクレイピング
                 boat_data, env_data, success, _ = scrape_boatrace_data_v10(snipe_date, venue, r_num)
                 if not success: return None
                 
                 reasons = []
                 target_type = ""
                 
-                # 🔥 ① AIが最も当てやすいレース（高確信度・堅実鉄板）の探知
                 if res_dict["top1_prob"] >= 40.0 and env_data['風速'] < 4.0 and not res_dict["is_ken"]:
                     target_type = "💎 AI激推し(高確信)"
                     reasons.append(f"✨ AI自信度トップ（1位確率 {res_dict['top1_prob']:.1f}%）")
@@ -549,7 +543,6 @@ with tab3:
                     if boat_data[1]['級別'] == 'A1':
                         reasons.append("👑 1枠A1級鉄板逃げ")
                 
-                # 🔥 ② 荒れやすい穴レースの探知
                 elif boat_data[1]['級別'] in ['B1', 'B2'] and any(boat_data[w]['級別'] in ['A1', 'A2'] for w in [2, 3, 4]):
                     target_type = "🔥 波乱(穴)"
                     reasons.append("🚨 イン激弱（1枠B級 / 外にA級）")
