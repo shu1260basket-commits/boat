@@ -12,26 +12,24 @@ import itertools
 import time
 import plotly.express as px
 import concurrent.futures 
-import xgboost as xgb
 
-st.set_page_config(page_title="ボートレースAI【v12 展開読み＋アンサンブル完全体】", layout="wide")
+st.set_page_config(page_title="ボートレースAI【v12 完全体・アンサンブル版】", layout="wide")
 
-# 1. 究極のAI（v12 アンサンブル脳）の読み込み
 @st.cache_resource
 def load_brain():
     with open('boat_ai_brain_v12_ensemble.pkl', 'rb') as f:
         saved_data = pickle.load(f)
-    return (
-        saved_data['model_lgb'],
-        saved_data['model_xgb'],
-        saved_data['features'],
-        saved_data['racer_stats']
-    )
+    return saved_data
 
 try:
-    model_lgb, model_xgb, train_features, racer_stats = load_brain()
-except FileNotFoundError:
-    st.error("⚠️ `boat_ai_brain_v12_ensemble.pkl` が見つかりません。学習スクリプトを実行してください。")
+    brain = load_brain()
+    model_lgb = brain['model_lgb']
+    model_xgb = brain['model_xgb']
+    train_features = brain['features']
+    racer_wins = brain['racer_stats']['wins']
+    racer_races = brain['racer_stats']['races']
+except Exception as e:
+    st.error(f"⚠️ `boat_ai_brain_v12_ensemble.pkl` の読み込みエラー: {e}")
     st.stop()
 
 VENUE_MAP = {
@@ -45,13 +43,12 @@ session = requests.Session()
 retries = Retry(total=3, backoff_factor=1, status_forcelist=[403, 500, 502, 503, 504])
 session.mount('https://', HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20))
 session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 })
 
 def scrape_boatrace_data_v12(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
-    
     url_list = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno={int(race_num)}&jcd={jcd}&hd={clean_date}"
     url_before = f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={int(race_num)}&jcd={jcd}&hd={clean_date}"
     
@@ -61,19 +58,23 @@ def scrape_boatrace_data_v12(target_date, venue, race_num):
     try:
         res_list = session.get(url_list, timeout=15)
         res_list.encoding = 'utf-8'
-        if res_list.status_code != 200: return None, None, False, "通信ブロック"
+        if res_list.status_code != 200: return None, None, False, f"通信ブロック ({res_list.status_code})"
 
         soup_list = BeautifulSoup(res_list.text, 'html.parser')
         tbodies_list = soup_list.find_all('tbody', class_='is-fs12')
-        if len(tbodies_list) < 6: return None, None, False, "データ未公開"
+        if len(tbodies_list) < 6: return None, None, False, "休催日 または データ未公開"
             
         for waku, tbody in enumerate(tbodies_list[:6], 1):
             text_data = tbody.text.replace('\n', ' ').replace('\r', ' ')
             toban_match = re.search(r'(\d{4})\s*/\s*([A-B][1-2])', text_data)
             toban = int(toban_match.group(1)) if toban_match else 0
+            
             try: motor = int(re.findall(r'\b(\d{1,3})\b', tbody.text)[-6])
             except: motor = 0
-            boat_data[waku] = {'登番': toban, 'モーター': motor, '展示': 0.0, '進入コース': waku, '平均ST': 0.17}
+            
+            boat_data[waku] = {
+                '登番': toban, 'モーター': motor, '展示': 0.0, '進入コース': waku, '平均ST': 0.17
+            }
             
         time.sleep(0.5) 
         res_before = session.get(url_before, timeout=15)
@@ -92,6 +93,7 @@ def scrape_boatrace_data_v12(target_date, venue, race_num):
             floats = re.findall(r'[-]?\d\.\d{1,2}', tbody.text)
             if len(floats) >= 4:
                 boat_data[waku]['展示'] = float(floats[0]) if float(floats[0]) > 5.0 else 0.0
+
             st_match = re.findall(r'0\.\d{2}', t_text)
             if st_match:
                 boat_data[waku]['平均ST'] = float(st_match[0]) 
@@ -104,7 +106,7 @@ def scrape_boatrace_data_v12(target_date, venue, race_num):
                     
         return boat_data, env_data, True, ""
     except Exception as e:
-        return None, None, False, f"エラー: {str(e)}"
+        return None, None, False, f"通信/解析エラー: {str(e)}"
 
 def fetch_actual_result(target_date, jcd, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
@@ -113,6 +115,7 @@ def fetch_actual_result(target_date, jcd, race_num):
         res = session.get(url, timeout=15)
         res.encoding = 'utf-8'
         if res.status_code != 200: return "通信ブロック", 0
+            
         soup = BeautifulSoup(res.text, 'html.parser')
         trs = soup.find_all('tr')
         for tr in trs:
@@ -122,7 +125,9 @@ def fetch_actual_result(target_date, jcd, race_num):
                     raw_text = tds[1].text.strip()
                     digits = re.findall(r'[1-6]', raw_text)
                     result_str = f"{digits[0]}-{digits[1]}-{digits[2]}" if len(digits) >= 3 else raw_text
-                    payout_val = max([int(n) for n in re.findall(r'\d+', tds[2].text.replace(',', '')) if int(n) >= 100], default=0)
+                    payout_cell_text = tds[2].text.replace(',', '')
+                    numbers = re.findall(r'\d+', payout_cell_text)
+                    payout_val = max([int(n) for n in numbers if int(n) >= 100]) if numbers else 0
                     return result_str, payout_val
         return "データなし(未発走)", 0
     except:
@@ -132,52 +137,57 @@ def predict_race_auto_v12(target_date, venue, race_num, is_backtest=False):
     boat_data, env_data, success, msg = scrape_boatrace_data_v12(target_date, venue, race_num)
     if not success: return {"error": msg}
     
-    # 🔥 v12専用: 相対特徴量（展開読み）とマスタデータの計算
-    st_vals = [boat_data[w]['平均ST'] for w in range(1, 7)]
-    tenji_vals = [boat_data[w]['展示'] for w in range(1, 7) if boat_data[w]['展示'] > 0]
-    tenji_mean = np.mean(tenji_vals) if tenji_vals else 0.0
+    st_array = [boat_data[w]['平均ST'] for w in range(1, 7)]
+    tenji_array = [boat_data[w]['展示'] for w in range(1, 7)]
+    tenji_mean = np.mean(tenji_array)
 
     input_list = []
-    for w in range(1, 7):
-        toban = boat_data[w]['登番']
-        win_rate = racer_stats['wins'].get(toban, 0) / max(1, racer_stats['races'].get(toban, 1))
-        inside_st = st_vals[w-2] if w > 1 else st_vals[w-1]
-        st_diff_inside = boat_data[w]['平均ST'] - inside_st
-        tenji_diff_avg = boat_data[w]['展示'] - tenji_mean if boat_data[w]['展示'] > 0 else 0.0
+    for i in range(6):
+        waku = i + 1
+        toban = boat_data[waku]['登番']
+        win_rate = racer_wins.get(toban, 0) / max(1, racer_races.get(toban, 1))
+        inside_st = st_array[i-1] if i > 0 else st_array[i]
         
         input_dict = {
-            '枠番': w, '登番': toban, 'モーター': boat_data[w]['モーター'],
-            '展示': boat_data[w]['展示'], '進入コース': boat_data[w]['進入コース'],
-            '平均ST': boat_data[w]['平均ST'], '風速': env_data['風速'], '波高': env_data['波高'],
-            '1着率': win_rate, '内側ST差': st_diff_inside, '展示平均差': tenji_diff_avg
+            '枠番': waku, 
+            '登番': toban, 
+            'モーター': boat_data[waku]['モーター'],
+            '展示': boat_data[waku]['展示'], 
+            '進入コース': boat_data[waku]['進入コース'],
+            '平均ST': boat_data[waku]['平均ST'], 
+            '風速': env_data['風速'], 
+            '波高': env_data['波高'],
+            '1着率': win_rate,
+            '内側ST差': boat_data[waku]['平均ST'] - inside_st,
+            '展示平均差': boat_data[waku]['展示'] - tenji_mean
         }
-        input_list.append({col: input_dict.get(col, 0.0) for col in train_features})
+        ordered_dict = {col: input_dict.get(col, 0.0) for col in train_features}
+        input_list.append(ordered_dict)
 
     X_pred = pd.DataFrame(input_list)[train_features]
     
-    for col in X_pred.columns:
-        if str(X_pred[col].dtype) == 'object': X_pred[col] = pd.to_numeric(X_pred[col], errors='coerce').fillna(0.0)
-
-    # 🔥 v12専用: LightGBMとXGBoostのアンサンブル（多数決）処理
-    # 1. LightGBMの確率算出
     lgb_scores = model_lgb.predict(X_pred)
-    z_lgb = (lgb_scores - np.mean(lgb_scores)) / (np.std(lgb_scores) + 1e-9)
-    prob_lgb = np.exp(z_lgb * 1.5) / np.sum(np.exp(z_lgb * 1.5))
-    
-    # 2. XGBoostの確率算出
     xgb_scores = model_xgb.predict(X_pred)
+    
+    z_lgb = (lgb_scores - np.mean(lgb_scores)) / (np.std(lgb_scores) + 1e-9)
     z_xgb = (xgb_scores - np.mean(xgb_scores)) / (np.std(xgb_scores) + 1e-9)
-    prob_xgb = np.exp(z_xgb * 1.5) / np.sum(np.exp(z_xgb * 1.5))
+    ensemble_scores = (z_lgb + z_xgb) / 2.0
     
-    # 3. 2つのAIの意見を合体（平均化）
-    win_probs = (prob_lgb + prob_xgb) / 2.0
-    
-    # XGBとLGBの意見が割れている（分散が大きい）場合は確信度を下げるペナルティ
-    disagreement_penalty = np.std([prob_lgb[0], prob_xgb[0]]) * 0.5 
+    score_details = {}
+    graph_data = [] 
+    for i in range(6):
+        waku = i + 1
+        score_details[waku] = f"LGB: {z_lgb[i]:.2f} / XGB: {z_xgb[i]:.2f} / 総合: {ensemble_scores[i]:.2f}"
+        graph_data.append({"枠": f"{waku}枠", "項目": "総合期待値", "スコア": round(ensemble_scores[i], 3)})
+        
+    temperature = 1.5 
+    exp_scores = np.exp(ensemble_scores * temperature)
+    win_probs = exp_scores / np.sum(exp_scores)
     
     top_indices = np.argsort(win_probs)[::-1][:4]
     t1, t2, t3, t4 = [i + 1 for i in top_indices]
-    top1_win_prob = (win_probs[top_indices[0]] - disagreement_penalty) * 100.0
+    
+    top1_win_prob = win_probs[top_indices[0]] * 100.0
 
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
@@ -191,7 +201,7 @@ def predict_race_auto_v12(target_date, venue, race_num, is_backtest=False):
     
     bets = []
     if top1_win_prob >= 40.0: 
-        bet_type_name = "💎 究極・鉄板（激絞り4点）"
+        bet_type_name = "💎 超・鉄板（激絞り4点）"
         bets = [f"{t1}-{t2}-{t3}", f"{t1}-{t2}-{t4}", f"{t1}-{t3}-{t2}", f"{t1}-{t3}-{t4}"]
     else: 
         bet_type_name = "🎯 本命＆逆転（フォーメーション8点）"
@@ -203,16 +213,210 @@ def predict_race_auto_v12(target_date, venue, race_num, is_backtest=False):
 
     is_ken = (top1_win_prob < 25.0) or (env_data['風速'] >= 6.0)
     if is_ken:
-        bet_type_name = f"⚠️ 見送り推奨 (AI意見割れ・条件悪化)"
+        bet_type_name = f"⚠️ 見送り推奨 (仮の買い目: {bet_type_name})"
 
     is_easy_hit = (top1_win_prob >= 40.0) and not is_ken
 
     if is_backtest:
         return {
-            "race_num": f"{race_num}R", "本命": prob_sorted[0][0], "total_bets": bets,
-            "bet_type": bet_type_name, "is_ken": is_ken, "is_easy_hit": is_easy_hit, "top1_win_prob": top1_win_prob
+            "race_num": f"{race_num}R",
+            "本命": prob_sorted[0][0],
+            "total_bets": bets,
+            "bet_type": bet_type_name,
+            "is_ken": is_ken,
+            "is_easy_hit": is_easy_hit,
+            "top1_win_prob": top1_win_prob
         }
     
-    result_text = f"🌐 【v12 完全体アンサンブルAI】解析完了！\n"
+    result_text = f"🌐 【v12 完全体・アンサンブルAI】解析完了！\n"
     result_text += f"🌪️ 水面環境: {venue} / 風速 {env_data['風速']}m\n"
-    result_text += f"🎯 アンサンブル1位抜け確率: {top1_win_prob
+    result_text += f"🎯 アンサンブル1位抜け確率: {top1_win_prob:.1f}%\n\n"
+    
+    if is_ken:
+        result_text += f"⚠️ 【AI判定: ケン（見送り）】\n※本来は無駄な資金を溶かさないために参加を見送り推奨。\n\n"
+    else:
+        result_text += f"✨ 【AI投資判定】 勝負可能！\n\n"
+    
+    result_text += "📊 各艇のAIスコア詳細（LGB / XGB / 総合）\n"
+    for i in range(1, 7):
+        detail = score_details[i]
+        result_text += f"{i}枠: 【{detail}】 (1着率 {win_probs[i-1]*100:.1f}%)\n"
+        
+    result_text += f"\n🎯 AI自信のピンポイント予想（3連単 上位8点）\n"
+    result_text += "-" * 50 + "\n"
+    for i in range(min(8, len(prob_sorted))):
+        result_text += f"第{i+1}推奨: 【{prob_sorted[i][0]}】 (確率 {prob_sorted[i][1]:.1f}%)\n"
+        
+    result_text += f"\n🎯 激絞り買い目指示\n"
+    result_text += "-" * 50 + "\n"
+    result_text += f"👉 展開予想買い目（{len(bets)}点）: {', '.join(bets)}\n"
+    result_text += "※これ以上の点数を買うとトリガミのリスクが高まります。\n"
+    result_text += "-" * 50 + "\n"
+
+    return {"text": result_text, "graph_data": pd.DataFrame(graph_data)}
+
+st.title("🚤 ボートレースAI【v12 完全体・アンサンブル版】")
+
+tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 厳格バックテスト", "🎯 全国スナイパー"])
+today_str = datetime.datetime.now().strftime('%Y%m%d')
+
+with tab1:
+    st.write("LGBMとXGBoostの2つのAI、さらに選手マスタと展開読み（相対特徴量）を統合した最強モデル。")
+    col1, col2, col3 = st.columns(3)
+    with col1: target_date = st.text_input("日付 (例: 20261105)", value=today_str, key="date1")
+    with col2: venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=9, key="venue1")
+    with col3: race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1, key="race1")
+
+    if st.button("⚡ v12 アンサンブル予想！", type="primary"):
+        with st.spinner("2つのAIが協調してレース展開を予測しています..."):
+            res_dict = predict_race_auto_v12(target_date, venue, race_num)
+            if "error" in res_dict:
+                st.error(f"【予想失敗】 {res_dict['error']}")
+            else:
+                st.text_area("AIのスコア解析結果", value=res_dict["text"], height=450)
+                df_graph = res_dict["graph_data"]
+                fig = px.bar(
+                    df_graph, x='枠', y='スコア', color='枠', barmode='group', template="plotly_dark",
+                    text_auto='.2f', color_discrete_sequence=['#ffffff', '#aaaaaa', '#ff4444', '#44aaff', '#ffee00', '#44ff44']
+                )
+                fig.update_layout(title="📊 AI総合期待値スコア（Z-score）", xaxis_title=None, yaxis_title="標準化スコア", legend_title="枠番")
+                st.plotly_chart(fig, use_container_width=True)
+
+with tab2:
+    st.write("AIが「ケン」と判定したレースも強制的に資金を投じて、仮に買っていた場合の収支を全て記録します。")
+    col1_bt, col2_bt, col3_bt = st.columns(3)
+    with col1_bt: bt_date = st.text_input("日付 (例: 20261105)", value=today_str, key="date2")
+    with col2_bt: bt_venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=9, key="venue2")
+    with col3_bt: bt_budget = st.number_input("1レースあたりの予算（円）", min_value=800, max_value=50000, value=3000, step=500, key="budget2")
+        
+    if st.button("🔄 1R〜12R 全レース強制投資バックテスト開始", type="primary"):
+        progress_text = "バックテスト実行中..."
+        my_bar = st.progress(0, text=progress_text)
+        results = []
+        jcd = VENUE_MAP[bt_venue]
+        scan_count = 0
+        total_scans = 12
+        total_invest = 0
+        total_return = 0
+        
+        def run_backtest_single(r_num):
+            res_dict = predict_race_auto_v12(bt_date, bt_venue, r_num, is_backtest=True)
+            actual_result, actual_payout_val = fetch_actual_result(bt_date, jcd, r_num)
+            time.sleep(0.3) 
+            
+            if res_dict and "error" not in res_dict:
+                is_ken = res_dict["is_ken"]
+                is_easy_hit = res_dict["is_easy_hit"]
+                bets = res_dict["total_bets"]
+                
+                status = "-"
+                profit = 0
+                invest = 0
+                return_val = 0
+                
+                if actual_payout_val == 0:
+                    status = "未発走/中止"
+                elif is_ken or not bets:
+                    status = "見送り(AI判定)"
+                else:
+                    num_bets = len(bets)
+                    base_amt = max(100, (bt_budget // num_bets // 100) * 100)
+                    invest = base_amt * num_bets
+                    if actual_result in bets:
+                        status = "🎯 的中！" if not is_ken else "🎯 的中(AIは見送り判定)"
+                        if is_easy_hit: status = "💎 的中(超・鉄板)！"
+                        return_val = int(actual_payout_val * (base_amt / 100))
+                        profit = return_val - invest
+                    else:
+                        status = "❌ ハズレ" if not is_ken else "❌ ハズレ(AIは見送り判定)"
+                        profit = -invest
+                
+                return {
+                    "R": f"{r_num}R", "投資判定": res_dict["bet_type"], "買い目": f"{len(bets)}点買い",
+                    "実際の結果": actual_result, "払戻金(100円)": f"¥{actual_payout_val:,}" if actual_payout_val > 0 else "-",
+                    "判定": status, "収支": profit, "投資": invest, "回収": return_val
+                }
+            else:
+                err_msg = res_dict["error"] if res_dict else "データ未公開"
+                return {"R": f"{r_num}R", "投資判定": "-", "買い目": f"【失敗】 {err_msg}", "実際の結果": actual_result, "払戻金(100円)": "-", "判定": "-", "収支": 0, "投資": 0, "回収": 0}
+        
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            futures = {executor.submit(run_backtest_single, r): r for r in range(1, 13)}
+            for future in concurrent.futures.as_completed(futures):
+                scan_count += 1
+                my_bar.progress(scan_count / total_scans, text=f"スキャン中... 完了 {scan_count}/12 レース")
+                res = future.result()
+                results.append(res)
+                total_invest += res["投資"]
+                total_return += res["回収"]
+                
+        my_bar.empty()
+        net_profit = total_return - total_invest
+        roi = (total_return / total_invest * 100) if total_invest > 0 else 0
+        
+        st.success(f"{bt_venue}全12レースのバックテストが完了しました！")
+        df_results = pd.DataFrame(results)
+        df_results['R_num'] = df_results['R'].str.replace('R', '').astype(int)
+        df_results = df_results.sort_values(by='R_num').drop(columns=['R_num']).set_index("R")
+        
+        df_display = df_results[['投資判定', '買い目', '実際の結果', '払戻金(100円)', '判定', '収支']].copy()
+        df_display['収支'] = df_display['収支'].apply(lambda x: f"+{x:,}円" if x > 0 else f"{x:,}円" if x < 0 else "-")
+        st.dataframe(df_display, use_container_width=True)
+        
+        st.markdown("### 📊 トータル収支（AIケン判定のレースも全て強制購入した結果）")
+        col_sum1, col_sum2, col_sum3 = st.columns(3)
+        col_sum1.metric("総投資額", f"¥{total_invest:,}")
+        col_sum2.metric("総払戻額", f"¥{total_return:,}")
+        col_sum3.metric("回収率", f"{roi:.1f}%", f"{net_profit:,}円")
+
+with tab3:
+    st.header("🎯 全国スナイパー（超・鉄板レース一本釣りモード）")
+    st.write("全国のレース場から、勝率・回収率を極限まで高められる「超・鉄板（激絞り4点で仕留められる）」レースだけを検索します。")
+    
+    col1_sn, col2_sn = st.columns([1, 3])
+    with col1_sn: snipe_date = st.text_input("スキャン日付", value=today_str, key="date4")
+    with col2_sn: target_venues = st.multiselect("スキャン対象の会場", options=list(VENUE_MAP.keys()), default=["平和島", "戸田", "江戸川", "鳴門", "福岡"])
+    
+    if st.button("📡 一本釣り探知を開始する", type="primary"):
+        if not target_venues: st.error("会場を1つ以上選択してください。")
+        else:
+            hot_races = []
+            progress_bar = st.progress(0)
+            status_text = st.empty()
+            race_targets = [(venue, r_num) for venue in target_venues for r_num in range(1, 13)]
+            total_scans = len(race_targets)
+            scan_count = 0
+            
+            def evaluate_race_for_sniper(target):
+                venue, r_num = target
+                res_dict = predict_race_auto_v12(snipe_date, venue, r_num, is_backtest=True)
+                time.sleep(0.3) 
+                if not res_dict or "error" in res_dict: return None
+                
+                if res_dict["is_easy_hit"]:
+                    return {
+                        "会場": venue, "R": f"{r_num}R", "狙い目": "💎 激絞り・鉄板",
+                        "AI確率(1位)": f"{res_dict['top1_win_prob']:.1f}%",
+                        "指示買い目": "4点買い"
+                    }
+                return None
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=8) as executor:
+                futures = {executor.submit(evaluate_race_for_sniper, t): t for t in race_targets}
+                for future in concurrent.futures.as_completed(futures):
+                    scan_count += 1
+                    status_text.text(f"📡 鉄板スキャン中... 完了 {scan_count}/{total_scans} レース")
+                    progress_bar.progress(scan_count / total_scans)
+                    res = future.result()
+                    if res: hot_races.append(res)
+                        
+            status_text.empty()
+            progress_bar.empty()
+            if hot_races:
+                st.success(f"🎯 {len(hot_races)}件の【超・鉄板レース】を探知しました！ここにだけ投資してください。")
+                df_hot = pd.DataFrame(hot_races)
+                df_hot['R_num'] = df_hot['R'].str.replace('R', '').astype(int)
+                df_hot = df_hot.sort_values(by=['会場', 'R_num']).drop(columns=['R_num']).reset_index(drop=True)
+                st.dataframe(df_hot, use_container_width=True)
+            else:
+                st.info("現在指定された会場には、打つべき確実な鉄板レースはありません。（無駄打ち回避成功）")
