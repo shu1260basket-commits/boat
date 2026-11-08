@@ -13,11 +13,11 @@ import time
 import plotly.express as px
 import concurrent.futures 
 
-st.set_page_config(page_title="ボートレースAI【v12 完全体・アンサンブル版】", layout="wide")
+st.set_page_config(page_title="ボートレースAI【v13 3連単特化・スジ展開同期版】", layout="wide")
 
 @st.cache_resource
 def load_brain():
-    with open('boat_ai_brain_v12_ensemble.pkl', 'rb') as f:
+    with open('boat_ai_brain_v13_suji.pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return saved_data
 
@@ -28,8 +28,9 @@ try:
     train_features = brain['features']
     racer_wins = brain['racer_stats']['wins']
     racer_races = brain['racer_stats']['races']
+    suji_stats = brain['suji_stats'] # 🔥 v13新規: スジ展開マスタ
 except Exception as e:
-    st.error(f"⚠️ `boat_ai_brain_v12_ensemble.pkl` の読み込みエラー: {e}")
+    st.error(f"⚠️ `boat_ai_brain_v13_suji.pkl` の読み込みエラー: {e}")
     st.stop()
 
 VENUE_MAP = {
@@ -46,7 +47,7 @@ session.headers.update({
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
 })
 
-def scrape_boatrace_data_v12(target_date, venue, race_num):
+def scrape_boatrace_data_v13(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
     url_list = f"https://www.boatrace.jp/owpc/pc/race/racelist?rno={int(race_num)}&jcd={jcd}&hd={clean_date}"
@@ -133,13 +134,15 @@ def fetch_actual_result(target_date, jcd, race_num):
     except:
         return "通信エラー", 0
 
-def predict_race_auto_v12(target_date, venue, race_num, is_backtest=False):
-    boat_data, env_data, success, msg = scrape_boatrace_data_v12(target_date, venue, race_num)
+def predict_race_auto_v13(target_date, venue, race_num, is_backtest=False):
+    boat_data, env_data, success, msg = scrape_boatrace_data_v13(target_date, venue, race_num)
     if not success: return {"error": msg}
     
     st_array = [boat_data[w]['平均ST'] for w in range(1, 7)]
     tenji_array = [boat_data[w]['展示'] for w in range(1, 7)]
     tenji_mean = np.mean(tenji_array)
+    
+    course_map = {w-1: boat_data[w]['進入コース'] for w in range(1, 7)}
 
     input_list = []
     for i in range(6):
@@ -149,16 +152,10 @@ def predict_race_auto_v12(target_date, venue, race_num, is_backtest=False):
         inside_st = st_array[i-1] if i > 0 else st_array[i]
         
         input_dict = {
-            '枠番': waku, 
-            '登番': toban, 
-            'モーター': boat_data[waku]['モーター'],
-            '展示': boat_data[waku]['展示'], 
-            '進入コース': boat_data[waku]['進入コース'],
-            '平均ST': boat_data[waku]['平均ST'], 
-            '風速': env_data['風速'], 
-            '波高': env_data['波高'],
-            '1着率': win_rate,
-            '内側ST差': boat_data[waku]['平均ST'] - inside_st,
+            '枠番': waku, '進入コース': boat_data[waku]['進入コース'],
+            '展示': boat_data[waku]['展示'], '平均ST': boat_data[waku]['平均ST'],
+            '風速': env_data['風速'], '波高': env_data['波高'],
+            '1着率': win_rate, '内側ST差': boat_data[waku]['平均ST'] - inside_st,
             '展示平均差': boat_data[waku]['展示'] - tenji_mean
         }
         ordered_dict = {col: input_dict.get(col, 0.0) for col in train_features}
@@ -177,45 +174,60 @@ def predict_race_auto_v12(target_date, venue, race_num, is_backtest=False):
     graph_data = [] 
     for i in range(6):
         waku = i + 1
-        score_details[waku] = f"LGB: {z_lgb[i]:.2f} / XGB: {z_xgb[i]:.2f} / 総合: {ensemble_scores[i]:.2f}"
+        score_details[waku] = f"総合期待値: {ensemble_scores[i]:.2f}"
         graph_data.append({"枠": f"{waku}枠", "項目": "総合期待値", "スコア": round(ensemble_scores[i], 3)})
         
     temperature = 1.5 
     exp_scores = np.exp(ensemble_scores * temperature)
     win_probs = exp_scores / np.sum(exp_scores)
     
-    top_indices = np.argsort(win_probs)[::-1][:4]
-    t1, t2, t3, t4 = [i + 1 for i in top_indices]
-    
-    top1_win_prob = win_probs[top_indices[0]] * 100.0
-
+    # 🔥 v13新規: スジ展開マスタを掛け合わせた【真の3連単確率】の計算
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
-    for (r1, r2, r3) in combos:
-        p1 = win_probs[r1]
-        p2 = win_probs[r2] / max(0.0001, 1.0 - win_probs[r1])
-        p3 = win_probs[r3] / max(0.0001, 1.0 - win_probs[r1] - win_probs[r2])
-        raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", p1 * p2 * p3 * 100))
-        
-    prob_sorted = sorted(raw_probs, key=lambda x: x[1], reverse=True)
     
-    bets = []
-    if top1_win_prob >= 40.0: 
-        bet_type_name = "💎 超・鉄板（激絞り4点）"
-        bets = [f"{t1}-{t2}-{t3}", f"{t1}-{t2}-{t4}", f"{t1}-{t3}-{t2}", f"{t1}-{t3}-{t4}"]
-    else: 
-        bet_type_name = "🎯 本命＆逆転（フォーメーション8点）"
-        for second in [t2, t3, t4]:
-            for third in [t2, t3, t4]:
-                if second != third: bets.append(f"{t1}-{second}-{third}")
-        for third in [t3, t4]:
-            bets.append(f"{t2}-{t1}-{third}")
+    for (r1, r2, r3) in combos:
+        c1, c2, c3 = course_map[r1], course_map[r2], course_map[r3]
+        
+        # 1着確率（AIの能力値）
+        p1 = win_probs[r1]
+        
+        # 2着確率（AIの能力値 × スジ展開マスタ）
+        p2_pl = win_probs[r2] / max(0.0001, 1.0 - win_probs[r1])
+        c1_count = max(1, suji_stats['1st_count'].get(c1, 1))
+        p2_suji = suji_stats['12_matrix'].get((c1, c2), 0) / c1_count
+        p2_suji = max(0.01, p2_suji) # ゼロ除算・完全排除の防止
+        
+        # 3着確率（AIの能力値 × スジ展開マスタ）
+        p3_pl = win_probs[r3] / max(0.0001, 1.0 - win_probs[r1] - win_probs[r2])
+        c12_count = max(1, suji_stats['12_matrix'].get((c1, c2), 1))
+        p3_suji = suji_stats['123_matrix'].get((c1, c2, c3), 0) / c12_count
+        p3_suji = max(0.01, p3_suji)
 
-    is_ken = (top1_win_prob < 25.0) or (env_data['風速'] >= 6.0)
+        # 全てを掛け合わせたスジ完全同期スコア
+        score = p1 * (p2_pl * p2_suji) * (p3_pl * p3_suji)
+        raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", score))
+        
+    # 確率を100%に正規化してソート
+    total_score = sum(x[1] for x in raw_probs)
+    prob_sorted = sorted([(c, (s / total_score) * 100) for c, s in raw_probs], key=lambda x: x[1], reverse=True)
+    
+    top1_3t_prob = prob_sorted[0][1] # 一番確率が高い3連単の確率
+    
+    # 指示買い目の生成（上位から抽出）
+    bets = []
+    if top1_3t_prob >= 15.0: # 3連単1点で15%以上は超鉄板
+        bet_type_name = "💎 究極スジ・超鉄板（激絞り4点）"
+        bets = [x[0] for x in prob_sorted[:4]]
+    else: 
+        bet_type_name = "🎯 展開スジ狙い（フォーメーション8点）"
+        bets = [x[0] for x in prob_sorted[:8]]
+
+    # 1番人気の3連単確率が極端に低い場合は見送り
+    is_ken = (top1_3t_prob < 5.0) or (env_data['風速'] >= 6.0)
     if is_ken:
         bet_type_name = f"⚠️ 見送り推奨 (仮の買い目: {bet_type_name})"
 
-    is_easy_hit = (top1_win_prob >= 40.0) and not is_ken
+    is_easy_hit = (top1_3t_prob >= 15.0) and not is_ken
 
     if is_backtest:
         return {
@@ -225,24 +237,24 @@ def predict_race_auto_v12(target_date, venue, race_num, is_backtest=False):
             "bet_type": bet_type_name,
             "is_ken": is_ken,
             "is_easy_hit": is_easy_hit,
-            "top1_win_prob": top1_win_prob
+            "top1_3t_prob": top1_3t_prob
         }
     
-    result_text = f"🌐 【v12 完全体・アンサンブルAI】解析完了！\n"
+    result_text = f"🌐 【v13 3連単特化・スジ展開同期版】解析完了！\n"
     result_text += f"🌪️ 水面環境: {venue} / 風速 {env_data['風速']}m\n"
-    result_text += f"🎯 アンサンブル1位抜け確率: {top1_win_prob:.1f}%\n\n"
+    result_text += f"🎯 AI推奨 3連単1番人気 信頼度: {top1_3t_prob:.1f}%\n\n"
     
     if is_ken:
-        result_text += f"⚠️ 【AI判定: ケン（見送り）】\n※本来は無駄な資金を溶かさないために参加を見送り推奨。\n\n"
+        result_text += f"⚠️ 【AI判定: ケン（見送り）】\n※展開が読み切れない超難解レース。投資は見送り推奨。\n\n"
     else:
         result_text += f"✨ 【AI投資判定】 勝負可能！\n\n"
     
-    result_text += "📊 各艇のAIスコア詳細（LGB / XGB / 総合）\n"
+    result_text += "📊 各艇のAIスコア詳細（1着抜け期待値）\n"
     for i in range(1, 7):
         detail = score_details[i]
         result_text += f"{i}枠: 【{detail}】 (1着率 {win_probs[i-1]*100:.1f}%)\n"
         
-    result_text += f"\n🎯 AI自信のピンポイント予想（3連単 上位8点）\n"
+    result_text += f"\n🎯 【スジ完全同期】3連単 上位8点予想\n"
     result_text += "-" * 50 + "\n"
     for i in range(min(8, len(prob_sorted))):
         result_text += f"第{i+1}推奨: 【{prob_sorted[i][0]}】 (確率 {prob_sorted[i][1]:.1f}%)\n"
@@ -255,21 +267,21 @@ def predict_race_auto_v12(target_date, venue, race_num, is_backtest=False):
 
     return {"text": result_text, "graph_data": pd.DataFrame(graph_data)}
 
-st.title("🚤 ボートレースAI【v12 完全体・アンサンブル版】")
+st.title("🚤 ボートレースAI【v13 3連単特化・スジ展開同期版】")
 
 tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 厳格バックテスト", "🎯 全国スナイパー"])
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
 with tab1:
-    st.write("LGBMとXGBoostの2つのAI、さらに選手マスタと展開読み（相対特徴量）を統合した最強モデル。")
+    st.write("2つのAIに加えて「スジ展開の物理法則」を掛け合わせ、あり得ない買い目を排除した3連単特化モデル。")
     col1, col2, col3 = st.columns(3)
     with col1: target_date = st.text_input("日付 (例: 20261105)", value=today_str, key="date1")
     with col2: venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=9, key="venue1")
     with col3: race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1, key="race1")
 
-    if st.button("⚡ v12 アンサンブル予想！", type="primary"):
-        with st.spinner("2つのAIが協調してレース展開を予測しています..."):
-            res_dict = predict_race_auto_v12(target_date, venue, race_num)
+    if st.button("⚡ v13 スジ同期AI予想！", type="primary"):
+        with st.spinner("スジ展開マスタとAIの予測確率を結合中..."):
+            res_dict = predict_race_auto_v13(target_date, venue, race_num)
             if "error" in res_dict:
                 st.error(f"【予想失敗】 {res_dict['error']}")
             else:
@@ -300,7 +312,7 @@ with tab2:
         total_return = 0
         
         def run_backtest_single(r_num):
-            res_dict = predict_race_auto_v12(bt_date, bt_venue, r_num, is_backtest=True)
+            res_dict = predict_race_auto_v13(bt_date, bt_venue, r_num, is_backtest=True)
             actual_result, actual_payout_val = fetch_actual_result(bt_date, jcd, r_num)
             time.sleep(0.3) 
             
@@ -389,14 +401,14 @@ with tab3:
             
             def evaluate_race_for_sniper(target):
                 venue, r_num = target
-                res_dict = predict_race_auto_v12(snipe_date, venue, r_num, is_backtest=True)
+                res_dict = predict_race_auto_v13(snipe_date, venue, r_num, is_backtest=True)
                 time.sleep(0.3) 
                 if not res_dict or "error" in res_dict: return None
                 
                 if res_dict["is_easy_hit"]:
                     return {
                         "会場": venue, "R": f"{r_num}R", "狙い目": "💎 激絞り・鉄板",
-                        "AI確率(1位)": f"{res_dict['top1_win_prob']:.1f}%",
+                        "AI確率(3連単)": f"{res_dict['top1_3t_prob']:.1f}%",
                         "指示買い目": "4点買い"
                     }
                 return None
