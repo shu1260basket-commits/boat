@@ -13,10 +13,8 @@ import time
 import plotly.express as px
 import concurrent.futures 
 
-# ページの基本設定
 st.set_page_config(page_title="ボートレースAI【v11 5年データ学習・一本釣り特化版】", layout="wide")
 
-# 1. 究極のAI（v11）の読み込み
 @st.cache_resource
 def load_brain():
     with open('boat_ai_brain_v11.pkl', 'rb') as f:
@@ -41,10 +39,14 @@ VENUE_MAP = {
     "下関": "19", "若松": "20", "芦屋": "21", "福岡": "22", "唐津": "23", "大村": "24"
 }
 
+# 🔥 公式サイトのBotブロックを回避するため、最新のブラウザヘッダーに偽装
 session = requests.Session()
-retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
+retries = Retry(total=3, backoff_factor=1, status_forcelist=[403, 500, 502, 503, 504])
 session.mount('https://', HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20))
-session.headers.update({'User-Agent': 'Mozilla/5.0'})
+session.headers.update({
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8'
+})
 
 def scrape_boatrace_data_v11(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
@@ -111,8 +113,9 @@ def scrape_boatrace_data_v11(target_date, venue, race_num):
                 if 1 <= actual_waku <= 6: boat_data[actual_waku]['進入コース'] = i + 1
                     
         return boat_data, env_data, True, url_before
-    except:
-        return None, None, False, "通信エラー"
+    except Exception as e:
+        # 🔥 何のエラーで落ちたかを画面に出力するよう修正
+        return None, None, False, f"通信/解析エラー: {str(e)}"
 
 def fetch_actual_result(target_date, jcd, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
@@ -135,7 +138,7 @@ def fetch_actual_result(target_date, jcd, race_num):
                     numbers = re.findall(r'\d+', payout_cell_text)
                     payout_val = max([int(n) for n in numbers if int(n) >= 100]) if numbers else 0
                     return result_str, payout_val
-        return "データなし(未発走・休催)", 0
+        return "データなし(未発走・中止)", 0
     except:
         return "通信エラー", 0
 
@@ -167,7 +170,6 @@ def predict_race_auto_v11(target_date, venue, race_num, is_backtest=False):
     for col in X_pred.columns:
         if str(X_pred[col].dtype) == 'object': X_pred[col] = pd.to_numeric(X_pred[col], errors='coerce').fillna(0.0)
 
-    # 1. AI純度100%のランキングスコア
     ai_raw_scores = model_ranker.predict(X_pred)
     
     score_details = {}
@@ -177,17 +179,16 @@ def predict_race_auto_v11(target_date, venue, race_num, is_backtest=False):
         score_details[waku] = f"AI期待値スコア: {ai_raw_scores[i]:>6.3f}"
         graph_data.append({"枠": f"{waku}枠", "項目": "AI純粋期待値", "スコア": round(ai_raw_scores[i], 3)})
         
-    # 🔥 修正1: Softmax関数で各艇の「1着になる確率」を正確に算出
-    exp_scores = np.exp(ai_raw_scores - np.max(ai_raw_scores))
+    z_scores = (ai_raw_scores - np.mean(ai_raw_scores)) / (np.std(ai_raw_scores) + 1e-9)
+    temperature = 1.5 
+    exp_scores = np.exp(z_scores * temperature)
     win_probs = exp_scores / np.sum(exp_scores)
     
     top_indices = np.argsort(win_probs)[::-1][:4]
     t1, t2, t3, t4 = [i + 1 for i in top_indices]
     
-    # 1着候補の勝率
     top1_win_prob = win_probs[top_indices[0]] * 100.0
 
-    # 3連単の確率算出 (Plackett-Luceモデル)
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
     for (r1, r2, r3) in combos:
@@ -198,28 +199,22 @@ def predict_race_auto_v11(target_date, venue, race_num, is_backtest=False):
         
     prob_sorted = sorted(raw_probs, key=lambda x: x[1], reverse=True)
     
-    # 🔥 修正2: 買い目ロジック（1着確率を基準に評価）
+    # 🔥 修正点：ケンの場合でも買い目を消さず、常に買い目（4〜8点）を生成する
     bets = []
-    bet_type_name = ""
-    
     if top1_win_prob >= 40.0: 
         bet_type_name = "💎 超・鉄板（激絞り4点）"
         bets = [f"{t1}-{t2}-{t3}", f"{t1}-{t2}-{t4}", f"{t1}-{t3}-{t2}", f"{t1}-{t3}-{t4}"]
-    elif top1_win_prob >= 25.0: 
+    else: 
         bet_type_name = "🎯 本命＆逆転（フォーメーション8点）"
         for second in [t2, t3, t4]:
             for third in [t2, t3, t4]:
                 if second != third: bets.append(f"{t1}-{second}-{third}")
         for third in [t3, t4]:
             bets.append(f"{t2}-{t1}-{third}")
-    else:
-        bets = []
-        bet_type_name = "⚠️ 混戦・波乱（完全見送り推奨）"
 
     is_ken = (top1_win_prob < 25.0) or (env_data['風速'] >= 6.0)
     if is_ken:
-        bets = []
-        bet_type_name = "⚠️ 悪条件・自信度低下（完全見送り推奨）"
+        bet_type_name = f"⚠️ 見送り推奨 (仮の買い目: {bet_type_name})"
 
     is_easy_hit = (top1_win_prob >= 40.0) and not is_ken
 
@@ -239,9 +234,9 @@ def predict_race_auto_v11(target_date, venue, race_num, is_backtest=False):
     result_text += f"🎯 AI 1位抜け確率: {top1_win_prob:.1f}%\n\n"
     
     if is_ken:
-        result_text += f"⚠️ 【完全見送り推奨】\n理由: {bet_type_name}\n※無駄な資金を溶かさないために参加を見送ってください。\n\n"
+        result_text += f"⚠️ 【AI判定: ケン（見送り）】\n※本来は無駄な資金を溶かさないために参加を見送るべきレースです。\n\n"
     else:
-        result_text += f"✨ 【AI投資判定】 {bet_type_name} で勝負可能！\n\n"
+        result_text += f"✨ 【AI投資判定】 勝負可能！\n\n"
     
     result_text += "📊 各艇のAI純粋期待値スコア\n"
     for i in range(1, 7):
@@ -255,16 +250,12 @@ def predict_race_auto_v11(target_date, venue, race_num, is_backtest=False):
         
     result_text += f"\n🎯 激絞り買い目指示\n"
     result_text += "-" * 50 + "\n"
-    if bets:
-        result_text += f"👉 指示買い目（{len(bets)}点）: {', '.join(bets)}\n"
-        result_text += "※これ以上の点数を買うとトリガミのリスクが高まります。\n"
-    else:
-        result_text += "👉 指示買い目: なし（ケン）\n"
+    result_text += f"👉 展開予想買い目（{len(bets)}点）: {', '.join(bets)}\n"
+    result_text += "※これ以上の点数を買うとトリガミのリスクが高まります。\n"
     result_text += "-" * 50 + "\n"
 
     return {"text": result_text, "graph_data": pd.DataFrame(graph_data)}
 
-# Streamlitの画面デザイン
 st.title("🚤 ボートレースAI【v11 5年データ学習・一本釣り特化版】")
 
 tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 厳格バックテスト", "🎯 全国スナイパー"])
@@ -281,7 +272,7 @@ with tab1:
         with st.spinner("AIが5年分の記憶から最適な展開を導き出しています..."):
             res_dict = predict_race_auto_v11(target_date, venue, race_num)
             if "error" in res_dict:
-                st.error(res_dict["error"])
+                st.error(f"【予想失敗】 {res_dict['error']}")
             else:
                 st.text_area("AIのスコア解析結果", value=res_dict["text"], height=450)
                 df_graph = res_dict["graph_data"]
@@ -293,14 +284,14 @@ with tab1:
                 st.plotly_chart(fig, use_container_width=True)
 
 with tab2:
-    st.write("勝率が低い・荒れる・ガミるレースを徹底的に「見送り」にし、本当に勝てるレースだけを厳選投資した場合のシミュレーションです。")
+    st.write("AIが「ケン」と判定したレースも強制的に資金を投じて、仮に買っていた場合の収支を全て記録します。")
     col1_bt, col2_bt, col3_bt = st.columns(3)
     with col1_bt: bt_date = st.text_input("日付 (例: 20261105)", value=today_str, key="date2")
     with col2_bt: bt_venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=9, key="venue2")
     with col3_bt: bt_budget = st.number_input("1レースあたりの予算（円）", min_value=800, max_value=50000, value=3000, step=500, key="budget2")
         
-    if st.button("🔄 1R〜12R 厳選バックテスト＆資金配分開始", type="primary"):
-        progress_text = "厳格フィルター実行中..."
+    if st.button("🔄 1R〜12R 全レース強制投資バックテスト開始", type="primary"):
+        progress_text = "バックテスト実行中..."
         my_bar = st.progress(0, text=progress_text)
         results = []
         jcd = VENUE_MAP[bt_venue]
@@ -324,30 +315,27 @@ with tab2:
                 invest = 0
                 return_val = 0
                 
-                # 🔥 修正3: 未発走・中止レースは「見送り（ノーカン）」として投資をゼロにする
+                # 🔥 未発走の場合は投資額もゼロにする（赤字にならないようにする）
                 if actual_payout_val == 0:
-                    status = "未発走/不明"
-                    invest = 0
-                    return_val = 0
-                elif is_ken or not bets:
-                    status = "見送り(AI判定)"
+                    status = "未発走/中止"
                     invest = 0
                     return_val = 0
                 else:
+                    # 🔥 ケンの場合でも強制的に資金を投じてシミュレーション
                     num_bets = len(bets)
                     base_amt = max(100, (bt_budget // num_bets // 100) * 100)
                     invest = base_amt * num_bets
                     if actual_result in bets:
-                        status = "🎯 的中！"
-                        if is_easy_hit: status = "💎 的中(高確信)！"
+                        status = "🎯 的中！" if not is_ken else "🎯 的中(AIは見送り判定)"
+                        if is_easy_hit: status = "💎 的中(超・鉄板)！"
                         return_val = int(actual_payout_val * (base_amt / 100))
                         profit = return_val - invest
                     else:
-                        status = "❌ ハズレ"
+                        status = "❌ ハズレ" if not is_ken else "❌ ハズレ(AIは見送り判定)"
                         profit = -invest
                 
                 return {
-                    "R": f"{r_num}R", "投資判定": res_dict["bet_type"], "買い目": f"{len(bets)}点買い" if bets else "-",
+                    "R": f"{r_num}R", "投資判定": res_dict["bet_type"], "買い目": f"{len(bets)}点買い",
                     "実際の結果": actual_result, "払戻金(100円)": f"¥{actual_payout_val:,}" if actual_payout_val > 0 else "-",
                     "判定": status, "収支": profit, "投資": invest, "回収": return_val
                 }
@@ -359,7 +347,7 @@ with tab2:
             futures = {executor.submit(run_backtest_single, r): r for r in range(1, 13)}
             for future in concurrent.futures.as_completed(futures):
                 scan_count += 1
-                my_bar.progress(scan_count / total_scans, text=f"厳選スキャン中... 完了 {scan_count}/12 レース")
+                my_bar.progress(scan_count / total_scans, text=f"スキャン中... 完了 {scan_count}/12 レース")
                 res = future.result()
                 results.append(res)
                 total_invest += res["投資"]
@@ -369,7 +357,7 @@ with tab2:
         net_profit = total_return - total_invest
         roi = (total_return / total_invest * 100) if total_invest > 0 else 0
         
-        st.success(f"{bt_venue}全12レースの厳選バックテストが完了しました！")
+        st.success(f"{bt_venue}全12レースのバックテストが完了しました！")
         df_results = pd.DataFrame(results)
         df_results['R_num'] = df_results['R'].str.replace('R', '').astype(int)
         df_results = df_results.sort_values(by='R_num').drop(columns=['R_num']).set_index("R")
@@ -378,7 +366,7 @@ with tab2:
         df_display['収支'] = df_display['収支'].apply(lambda x: f"+{x:,}円" if x > 0 else f"{x:,}円" if x < 0 else "-")
         st.dataframe(df_display, use_container_width=True)
         
-        st.markdown("### 📊 厳選トータル収支（見送り回避・激絞り投資シミュレーション）")
+        st.markdown("### 📊 トータル収支（AIケン判定のレースも全て強制購入した結果）")
         col_sum1, col_sum2, col_sum3 = st.columns(3)
         col_sum1.metric("総投資額", f"¥{total_invest:,}")
         col_sum2.metric("総払戻額", f"¥{total_return:,}")
