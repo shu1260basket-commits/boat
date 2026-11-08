@@ -46,7 +46,6 @@ retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504]
 session.mount('https://', HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20))
 session.headers.update({'User-Agent': 'Mozilla/5.0'})
 
-# 2. 直前情報スクレイピング関数（推論用）
 def scrape_boatrace_data_v11(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd = VENUE_MAP[venue]
@@ -103,7 +102,7 @@ def scrape_boatrace_data_v11(target_date, venue, race_num):
 
             st_match = re.findall(r'0\.\d{2}', t_text)
             if st_match:
-                boat_data[waku]['平均ST'] = float(st_match[0]) # 直前の展示STを使用
+                boat_data[waku]['平均ST'] = float(st_match[0]) 
 
         course_match = re.findall(r'(\d)コース', before_text)
         if len(course_match) >= 6:
@@ -136,7 +135,7 @@ def fetch_actual_result(target_date, jcd, race_num):
                     numbers = re.findall(r'\d+', payout_cell_text)
                     payout_val = max([int(n) for n in numbers if int(n) >= 100]) if numbers else 0
                     return result_str, payout_val
-        return "データなし(休催等)", 0
+        return "データなし(未発走・休催)", 0
     except:
         return "通信エラー", 0
 
@@ -145,32 +144,18 @@ def predict_race_auto_v11(target_date, venue, race_num, is_backtest=False):
     if not success: return {"error": msg}
     
     input_list = []
-    
-    # 3. AIに渡す特徴量の組み立て（5年分の学習データと完全に同じ形にする）
     for w in range(1, 7):
         input_dict = {
-            '枠番': w,
-            '登番': boat_data[w]['登番'],
-            'モーター': boat_data[w]['モーター'],
-            '展示': boat_data[w]['展示'],
-            '進入コース': boat_data[w]['進入コース'],
-            '平均ST': boat_data[w]['平均ST'],
-            '風速': env_data['風速'],
-            '波高': env_data['波高'],
-            # 学習時にダミーで入れた値も揃える
-            '気温': 20.0, '水温': 20.0, '温度差': 0.0,
-            '1着率': 0.0, '2連対率': 0.0, '3連対率': 0.0
+            '枠番': w, '登番': boat_data[w]['登番'], 'モーター': boat_data[w]['モーター'],
+            '展示': boat_data[w]['展示'], '進入コース': boat_data[w]['進入コース'],
+            '平均ST': boat_data[w]['平均ST'], '風速': env_data['風速'], '波高': env_data['波高'],
+            '気温': 20.0, '水温': 20.0, '温度差': 0.0, '1着率': 0.0, '2連対率': 0.0, '3連対率': 0.0
         }
-        
-        # 学習時のカラム順序を厳密に守る
-        ordered_dict = {}
-        for col in train_features:
-            ordered_dict[col] = input_dict.get(col, 0.0)
+        ordered_dict = {col: input_dict.get(col, 0.0) for col in train_features}
         input_list.append(ordered_dict)
 
     X_pred = pd.DataFrame(input_list)[train_features]
     
-    # カテゴリ変数の処理（LightGBMの仕様対応）
     booster = getattr(model_ranker, 'booster_', getattr(model_ranker, '_Booster', None))
     if booster and hasattr(booster, 'pandas_categorical') and booster.pandas_categorical:
         for item in booster.pandas_categorical:
@@ -182,49 +167,45 @@ def predict_race_auto_v11(target_date, venue, race_num, is_backtest=False):
     for col in X_pred.columns:
         if str(X_pred[col].dtype) == 'object': X_pred[col] = pd.to_numeric(X_pred[col], errors='coerce').fillna(0.0)
 
-    # 🔥 人間の小細工を一切排除した「AI純度100%のランキングスコア」！
+    # 1. AI純度100%のランキングスコア
     ai_raw_scores = model_ranker.predict(X_pred)
     
     score_details = {}
     graph_data = [] 
-    
     for i in range(6):
         waku = i + 1
         score_details[waku] = f"AI期待値スコア: {ai_raw_scores[i]:>6.3f}"
         graph_data.append({"枠": f"{waku}枠", "項目": "AI純粋期待値", "スコア": round(ai_raw_scores[i], 3)})
         
-    # スコアを確率分布へ変換（ソフトマックス関数的な処理）
-    # LambdaRankのスコアは相対的なので、最小値を0以上にオフセットして確率化
-    min_score = np.min(ai_raw_scores)
-    shifted_scores = ai_raw_scores - min_score + 0.1 # ゼロ除算防止
-    sum_score = np.sum(shifted_scores)
+    # 🔥 修正1: Softmax関数で各艇の「1着になる確率」を正確に算出
+    exp_scores = np.exp(ai_raw_scores - np.max(ai_raw_scores))
+    win_probs = exp_scores / np.sum(exp_scores)
     
-    combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
-    raw_probs = []
-    
-    for (r1, r2, r3) in combos:
-        p1 = shifted_scores[r1] / sum_score
-        p2 = shifted_scores[r2] / max(0.001, sum_score - shifted_scores[r1])
-        p3 = shifted_scores[r3] / max(0.001, sum_score - shifted_scores[r1] - shifted_scores[r2])
-        raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", p1 * p2 * p3))
-        
-    total_p = sum(x[1] for x in raw_probs)
-    final_probs = [(c, (p / total_p) * 100) for c, p in raw_probs]
-    prob_sorted = sorted(final_probs, key=lambda x: x[1], reverse=True)
-    
-    top1_prob = prob_sorted[0][1]
-    
-    # 🔥 勝率特化・激絞りロジック（ガミり排除）
-    top_indices = np.argsort(ai_raw_scores)[::-1][:4]
+    top_indices = np.argsort(win_probs)[::-1][:4]
     t1, t2, t3, t4 = [i + 1 for i in top_indices]
     
+    # 1着候補の勝率
+    top1_win_prob = win_probs[top_indices[0]] * 100.0
+
+    # 3連単の確率算出 (Plackett-Luceモデル)
+    combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
+    raw_probs = []
+    for (r1, r2, r3) in combos:
+        p1 = win_probs[r1]
+        p2 = win_probs[r2] / max(0.0001, 1.0 - win_probs[r1])
+        p3 = win_probs[r3] / max(0.0001, 1.0 - win_probs[r1] - win_probs[r2])
+        raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", p1 * p2 * p3 * 100))
+        
+    prob_sorted = sorted(raw_probs, key=lambda x: x[1], reverse=True)
+    
+    # 🔥 修正2: 買い目ロジック（1着確率を基準に評価）
     bets = []
     bet_type_name = ""
     
-    if top1_prob >= 40.0: # AIの確信度が非常に高い場合
+    if top1_win_prob >= 40.0: 
         bet_type_name = "💎 超・鉄板（激絞り4点）"
         bets = [f"{t1}-{t2}-{t3}", f"{t1}-{t2}-{t4}", f"{t1}-{t3}-{t2}", f"{t1}-{t3}-{t4}"]
-    elif top1_prob >= 25.0: # AIの確信度がそこそこの場合
+    elif top1_win_prob >= 25.0: 
         bet_type_name = "🎯 本命＆逆転（フォーメーション8点）"
         for second in [t2, t3, t4]:
             for third in [t2, t3, t4]:
@@ -235,13 +216,12 @@ def predict_race_auto_v11(target_date, venue, race_num, is_backtest=False):
         bets = []
         bet_type_name = "⚠️ 混戦・波乱（完全見送り推奨）"
 
-    # 厳格なケン（見送り）判定
-    is_ken = (top1_prob < 25.0) or (env_data['風速'] >= 6.0)
+    is_ken = (top1_win_prob < 25.0) or (env_data['風速'] >= 6.0)
     if is_ken:
         bets = []
         bet_type_name = "⚠️ 悪条件・自信度低下（完全見送り推奨）"
 
-    is_easy_hit = (top1_prob >= 40.0) and not is_ken
+    is_easy_hit = (top1_win_prob >= 40.0) and not is_ken
 
     if is_backtest:
         return {
@@ -251,12 +231,12 @@ def predict_race_auto_v11(target_date, venue, race_num, is_backtest=False):
             "bet_type": bet_type_name,
             "is_ken": is_ken,
             "is_easy_hit": is_easy_hit,
-            "top1_prob": top1_prob
+            "top1_win_prob": top1_win_prob
         }
     
     result_text = f"🌐 【v11 5年データ学習・純粋AIロジック】解析完了！\n"
     result_text += f"🌪️ 水面環境: {venue} / 風速 {env_data['風速']}m\n"
-    result_text += f"🎯 AI 1位抜け確率: {top1_prob:.1f}%\n\n"
+    result_text += f"🎯 AI 1位抜け確率: {top1_win_prob:.1f}%\n\n"
     
     if is_ken:
         result_text += f"⚠️ 【完全見送り推奨】\n理由: {bet_type_name}\n※無駄な資金を溶かさないために参加を見送ってください。\n\n"
@@ -266,9 +246,9 @@ def predict_race_auto_v11(target_date, venue, race_num, is_backtest=False):
     result_text += "📊 各艇のAI純粋期待値スコア\n"
     for i in range(1, 7):
         detail = score_details[i]
-        result_text += f"{i}枠: 【{detail}】\n"
+        result_text += f"{i}枠: 【{detail}】 (1着率 {win_probs[i-1]*100:.1f}%)\n"
         
-    result_text += f"\n🎯 AI自信のピンポイント予想（上位8点）\n"
+    result_text += f"\n🎯 AI自信のピンポイント予想（3連単 上位8点）\n"
     result_text += "-" * 50 + "\n"
     for i in range(min(8, len(prob_sorted))):
         result_text += f"第{i+1}推奨: 【{prob_sorted[i][0]}】 (確率 {prob_sorted[i][1]:.1f}%)\n"
@@ -288,7 +268,6 @@ def predict_race_auto_v11(target_date, venue, race_num, is_backtest=False):
 st.title("🚤 ボートレースAI【v11 5年データ学習・一本釣り特化版】")
 
 tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 厳格バックテスト", "🎯 全国スナイパー"])
-
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
 with tab1:
@@ -307,10 +286,8 @@ with tab1:
                 st.text_area("AIのスコア解析結果", value=res_dict["text"], height=450)
                 df_graph = res_dict["graph_data"]
                 fig = px.bar(
-                    df_graph, x='枠', y='スコア', color='枠', 
-                    barmode='group', template="plotly_dark",
-                    text_auto='.2f', 
-                    color_discrete_sequence=['#ffffff', '#aaaaaa', '#ff4444', '#44aaff', '#ffee00', '#44ff44']
+                    df_graph, x='枠', y='スコア', color='枠', barmode='group', template="plotly_dark",
+                    text_auto='.2f', color_discrete_sequence=['#ffffff', '#aaaaaa', '#ff4444', '#44aaff', '#ffee00', '#44ff44']
                 )
                 fig.update_layout(title="📊 AI純粋期待値スコア", xaxis_title=None, yaxis_title="評価スコア", legend_title="枠番")
                 st.plotly_chart(fig, use_container_width=True)
@@ -347,9 +324,13 @@ with tab2:
                 invest = 0
                 return_val = 0
                 
-                # 🔥 見送りの場合は一切資金を投じない（1円も賭けない）
-                if is_ken or not bets:
-                    status = "見送り"
+                # 🔥 修正3: 未発走・中止レースは「見送り（ノーカン）」として投資をゼロにする
+                if actual_payout_val == 0:
+                    status = "未発走/不明"
+                    invest = 0
+                    return_val = 0
+                elif is_ken or not bets:
+                    status = "見送り(AI判定)"
                     invest = 0
                     return_val = 0
                 else:
@@ -427,11 +408,10 @@ with tab3:
                 time.sleep(0.3) 
                 if not res_dict or "error" in res_dict: return None
                 
-                # 🔥 スナイパーでは「ケン」を一切表示せず、超・鉄板のみを抽出
                 if res_dict["is_easy_hit"]:
                     return {
                         "会場": venue, "R": f"{r_num}R", "狙い目": "💎 激絞り・鉄板",
-                        "AI確率(1位)": f"{res_dict['top1_prob']:.1f}%",
+                        "AI確率(1位)": f"{res_dict['top1_win_prob']:.1f}%",
                         "指示買い目": "4点買い"
                     }
                 return None
