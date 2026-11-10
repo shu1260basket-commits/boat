@@ -13,11 +13,11 @@ import time
 import plotly.express as px
 import concurrent.futures 
 
-st.set_page_config(page_title="ボートレースAI【v18 最終形態・メタ学習スナイパー】", layout="wide")
+st.set_page_config(page_title="ボートレースAI【v18 最終形態・スナイパー】", layout="wide")
 
 @st.cache_resource
 def load_brain():
-    # 🔥 v18の新しい脳みそをロード
+    # 🔥 新しく作ったv18の脳みそをロード
     with open('boat_ai_brain_v18_final.pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return saved_data
@@ -32,7 +32,7 @@ try:
     motor_stats = brain['motor_stats']
     racer_kimarite = brain['racer_kimarite']
     racer_in_fail = brain['racer_in_fail']
-    racer_names = brain.get('racer_names', {}) # 🔥 通信エラーを防ぐ神機能！
+    racer_names = brain.get('racer_names', {}) # 🔥 脳みそから直接名前を引き出す！
     suji_stats = brain['suji_stats']
     COURSE_AVG_1ST = brain['course_avg_1st']
     sweet_spots = brain.get('sweet_spots', {})
