@@ -180,7 +180,7 @@ def show_racer_profile(target_toban):
         
         course_data.append({
             "進入コース": f"{c}コース",
-            "出回数": runs,
+            "出走回数": runs,
             "1着率": f"{win_rate:.1f}%",
             "2連対率": f"{ren_rate:.1f}%",
             "3連対率": f"{sanren_rate:.1f}%",
@@ -299,7 +299,7 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
 
     X_pred = pd.DataFrame(input_list)[train_features]
     
-    # 舟券内に入るAI確率
+    # AIが予測した「3着以内に入る確率」
     lgb_probs = model_lgb.predict_proba(X_pred)[:, 1]
     xgb_probs = model_xgb.predict_proba(X_pred)[:, 1]
     ensemble_scores = (lgb_probs + xgb_probs) / 2.0
@@ -311,57 +311,52 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
         c_actual = boat_data[waku]['進入コース']
         score_details[waku] = f"舟券内AI確率: {ensemble_scores[i]*100:.1f}% (真の実力: {boat_data[waku]['true_skill']:+.3f} / {c_actual}ｺｰｽ3連対率: {boat_data[waku]['sanren_rate']:.1f}%)"
     
-    # 🔥 修正1：1着確率の過剰な指数ブーストを廃止。AI本来のバランスを取り戻す
-    p1_weights = []
+    # 🔥 修正1：1着の「絶対的パワー」を計算
+    p1_scores = []
     for i in range(1, 7):
         base_win = max(boat_data[i]['win_rate'], COURSE_AVG_1ST.get(boat_data[i]['進入コース'], 0.0))
         skill = boat_data[i]['true_skill']
-        w = base_win * (1.0 + max(0, skill * 1.5))
-        p1_weights.append(max(0.0001, w))
-    p1_probs = np.array(p1_weights) / sum(p1_weights)
+        # 1着はコース勝率と実力だけで明確に差をつける
+        p1_scores.append( (base_win ** 1.5) * np.exp(skill * 3.0) )
 
-    # 🔥 修正2：2・3着のポテンシャルもマイルドに。AIの「3連対率予想」を最も信頼する
-    potentials = []
+    # 🔥 修正2：2・3着の「ヒモ力（ポテンシャル）」を計算
+    place_scores = []
     for i in range(1, 7):
         ai_prob = ensemble_scores[i-1] 
+        real_sanren = boat_data[i]['sanren_rate'] / 100.0
         skill = boat_data[i]['true_skill']
-        potentials.append(ai_prob * (1.0 + max(0, skill * 1.5)))
+        
+        # AI評価(40%) + 実際の3連対率(60%) をベースにする
+        base = (ai_prob * 0.4) + (real_sanren * 0.6)
+        
+        # 💥 峰竜太(+0.166)のような圧倒的実力者を「5倍以上」に跳ね上げる猛烈バフ！
+        place_scores.append( (base ** 1.5) * np.exp(skill * 10.0) )
         
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
     
     for (r1, r2, r3) in combos:
-        c1 = course_map[r1]
-        c2 = course_map[r2]
-        c3 = course_map[r3]
+        c1, c2, c3 = course_map[r1], course_map[r2], course_map[r3]
         
-        p1 = p1_probs[r1]
+        s1 = p1_scores[r1]
+        s2 = place_scores[r2]
+        s3 = place_scores[r3]
         
-        # 🔥 修正3：スジの「ゼロ掛けの罠」を防ぐための最低保証（0.2）
-        # これにより、AIが高評価した外枠選手がスジの低さで消されることを防ぐ
-        w2_list = []
-        for cand2 in range(6):
-            if cand2 == r1:
-                w2_list.append(0)
-            else:
-                c_cand2 = course_map[cand2]
-                suji2 = suji_stats['12_matrix'].get((c1, c_cand2), 0) / max(1, suji_stats['1st_count'].get(c1, 1))
-                w2_list.append(potentials[cand2] * (suji2 + 0.2))
-        p2 = w2_list[r2] / max(0.0001, sum(w2_list))
+        # 🔥 修正3：スジは「ゼロ掛け」しない「ボーナス（最低1.0倍〜）」として扱う
+        # これで、AIが高評価した外枠選手が、スジの低さのせいで消される現象を完全に防ぐ
+        c1_count = max(1, suji_stats['1st_count'].get(c1, 1))
+        suji2_rate = suji_stats['12_matrix'].get((c1, c2), 0) / c1_count
+        suji2_bonus = 1.0 + (suji2_rate * 3.0) # よく来るスジには最大4倍の加点
         
-        w3_list = []
-        for cand3 in range(6):
-            if cand3 == r1 or cand3 == r2:
-                w3_list.append(0)
-            else:
-                c_cand3 = course_map[cand3]
-                suji3 = suji_stats['123_matrix'].get((c1, course_map[r2], c_cand3), 0) / max(1, suji_stats['12_matrix'].get((c1, course_map[r2]), 1))
-                w3_list.append(potentials[cand3] * (suji3 + 0.2))
-        p3 = w3_list[r3] / max(0.0001, sum(w3_list))
+        c12_count = max(1, suji_stats['12_matrix'].get((c1, c2), 1))
+        suji3_rate = suji_stats['123_matrix'].get((c1, c2, c3), 0) / c12_count
+        suji3_bonus = 1.0 + (suji3_rate * 3.0)
         
-        score = p1 * p2 * p3
+        # 🔥 修正4：途中の正規化（割り算）を全廃止！純粋なパワーの掛け算にする
+        score = s1 * (s2 * suji2_bonus) * (s3 * suji3_bonus)
         raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", score))
         
+    # ここで初めて、120通りの合計が100%になるように一括で正規化する
     total_score = sum(x[1] for x in raw_probs)
     prob_sorted = sorted([(c, (s / total_score) * 100) for c, s in raw_probs], key=lambda x: x[1], reverse=True)
     
