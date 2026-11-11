@@ -10,7 +10,6 @@ import datetime
 import re
 import itertools
 import time
-import plotly.express as px
 import concurrent.futures 
 
 st.set_page_config(page_title="ボートレースAI【v19 展開認知・スナイパー】", layout="wide")
@@ -319,31 +318,27 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
         w1, w2, w3 = r1 + 1, r2 + 1, r3 + 1
         c1, c2, c3 = course_map[r1], course_map[r2], course_map[r3]
         
-        # 1着はAIの予測勝率をそのまま採用
         p1 = win_probs[r1]
         
-        # 🔥 修正箇所：2着・3着は「1着至上主義」を排除し、実際の3連対率と真の実力を強制ブレンド！
-        sanren_p2 = boat_data[w2]['sanren_rate'] / 100.0
-        sanren_p3 = boat_data[w3]['sanren_rate'] / 100.0
-        skill_bonus2 = 1.0 + max(0, boat_data[w2]['true_skill'] * 1.5)
-        skill_bonus3 = 1.0 + max(0, boat_data[w3]['true_skill'] * 1.5)
+        # 🔥 実力者（峰竜太など）を強引に引き上げる！元のAIスコアに縛られず3連対率と真の実力を最優先
+        sanren_p2 = max(0.01, boat_data[w2]['sanren_rate'] / 100.0)
+        sanren_p3 = max(0.01, boat_data[w3]['sanren_rate'] / 100.0)
+        skill_bonus2 = 1.0 + max(0, boat_data[w2]['true_skill'] * 3.0) # ボーナス3倍増！
+        skill_bonus3 = 1.0 + max(0, boat_data[w3]['true_skill'] * 3.0) 
         
-        base_p2 = win_probs[r2] / max(0.0001, 1.0 - win_probs[r1])
-        base_p3 = win_probs[r3] / max(0.0001, 1.0 - win_probs[r1] - win_probs[r2])
-        
-        # スジ出現率
         c1_count = max(1, suji_stats['1st_count'].get(c1, 1))
         p2_suji = max(0.01, suji_stats['12_matrix'].get((c1, c2), 0) / c1_count) 
         c12_count = max(1, suji_stats['12_matrix'].get((c1, c2), 1))
         p3_suji = max(0.01, suji_stats['123_matrix'].get((c1, c2, c3), 0) / c12_count)
 
-        # AIスコアが低くても、実力と3連対率が高い選手（例：峰竜太）を2,3着に強烈に引き上げる
-        p2_pl = (base_p2 * 0.4) + (sanren_p2 * skill_bonus2 * 0.6)
-        p3_pl = (base_p3 * 0.2) + (sanren_p3 * skill_bonus3 * 0.8)
+        # AIの勝率スコアの影響を最小限（0.1）にし、実力・コース相性を最大化（0.9）
+        p2_pl = (win_probs[r2] * 0.1) + (sanren_p2 * skill_bonus2 * p2_suji * 0.9)
+        p3_pl = (win_probs[r3] * 0.1) + (sanren_p3 * skill_bonus3 * p3_suji * 0.9)
 
-        score = p1 * (p2_pl * p2_suji) * (p3_pl * p3_suji)
+        score = p1 * p2_pl * p3_pl
         
-        if p1 > 0.4 and (p2_suji < 0.10 or p3_suji < 0.05):
+        # 本命ガチガチでスジ違いの過大評価のみカット
+        if p1 > 0.4 and (p2_suji < 0.05 or p3_suji < 0.05):
              score = score * 0.5 
              
         raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", score))
