@@ -169,10 +169,10 @@ def predict_race_auto_v22(target_date, venue, race_num, is_backtest=False):
         boat_data[waku]['true_skill'] = true_skill_score
         boat_data[waku]['sanren_rate'] = sanren_rate * 100.0
 
-    # DataFrame作成時、カテゴリカル変数の型を正しく指定する
+    # 🔥 修正箇所：余計な .astype('category') を削除し、学習時と同じ整数型（int）で渡す
     X_pred = pd.DataFrame(input_list)[train_features]
     if '会場ID' in X_pred.columns:
-        X_pred['会場ID'] = X_pred['会場ID'].astype('category')
+        X_pred['会場ID'] = X_pred['会場ID'].astype(int)
     
     # 舟券内に入るAI確率
     lgb_probs = model_lgb.predict_proba(X_pred)[:, 1]
