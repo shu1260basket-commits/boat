@@ -31,8 +31,9 @@ try:
     racer_names = brain.get('racer_names', {}) 
     suji_stats = brain['suji_stats']
     COURSE_AVG_1ST = brain['course_avg_1st']
-    # v23で省略された可能性のあるデータは.get()で安全に取得
     sweet_spots = brain.get('sweet_spots', {})
+    
+    # 🔥 v23で復活した辞書データを読み込み
     racer_kimarite = brain.get('racer_kimarite', {})
     racer_in_fail = brain.get('racer_in_fail', {})
 except Exception as e:
