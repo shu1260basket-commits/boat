@@ -10,6 +10,7 @@ import datetime
 import re
 import itertools
 import time
+import concurrent.futures 
 
 st.set_page_config(page_title="ボートレースAI【v23 フル覚醒スナイパー】", layout="wide")
 
@@ -56,7 +57,7 @@ def scrape_boatrace_data(target_date, venue, race_num):
     env_data = {'風速': 0.0, '波高': 0.0, '風向': 0}
     
     try:
-        # 出走表（体重、F数）
+        # 1. 出走表（平均ST、体重、F数）のスクレイピング
         res_list = session.get(url_list, timeout=15)
         res_list.encoding = 'utf-8'
         soup_list = BeautifulSoup(res_list.text, 'html.parser')
@@ -64,18 +65,31 @@ def scrape_boatrace_data(target_date, venue, race_num):
             
         for waku, tbody in enumerate(tbodies_list[:6], 1):
             text_data = tbody.text.replace('\n', ' ')
-            toban = int(re.search(r'(\d{4})', text_data).group(1)) if re.search(r'(\d{4})', text_data) else 0
             
-            # 体重とF数
-            weight = float(re.search(r'(\d{2}\.\d)kg', text_data).group(1)) if re.search(r'(\d{2}\.\d)kg', text_data) else 51.0
-            f_count = int(re.search(r'F(\d)', text_data).group(1)) if re.search(r'F(\d)', text_data) else 0
+            toban_match = re.search(r'(\d{4})', text_data)
+            toban = int(toban_match.group(1)) if toban_match else 0
             
-            try: motor = int(re.findall(r'\b(\d{1,3})\b', tbody.text)[-6])
+            # 体重（40.0〜69.9kgの数値を抽出）
+            weight_match = re.search(r'([4-6]\d\.\d)', text_data)
+            weight = float(weight_match.group(1)) if weight_match else 51.0
+            
+            # F持ち
+            f_match = re.search(r'F(\d)', text_data)
+            f_count = int(f_match.group(1)) if f_match else 0
+            
+            # 平均ST
+            avg_st_matches = re.findall(r'0\.\d{2}', text_data)
+            avg_st = float(avg_st_matches[0]) if avg_st_matches else 0.17
+            
+            try: motor = int(re.findall(r'\b(\d{1,3})\b', text_data)[-6])
             except: motor = 0
-            boat_data[waku] = {'登番': toban, 'モーター': motor, '体重': weight, 'F持ち': f_count, '展示': 0.0, '進入コース': waku, '平均ST': 0.17, '展示ST': 0.17}
+            
+            # 初期データ登録（展示STは一旦、平均STで埋めておく）
+            boat_data[waku] = {'登番': toban, 'モーター': motor, '体重': weight, 'F持ち': f_count, '展示': 0.0, '進入コース': waku, '平均ST': avg_st, '展示ST': avg_st}
             
         time.sleep(0.5) 
-        # 直前情報（展示タイム、展示ST、風向）
+        
+        # 2. 直前情報（展示タイム、展示ST、風向）のスクレイピング
         res_before = session.get(url_before, timeout=15)
         res_before.encoding = 'utf-8'
         soup_before = BeautifulSoup(res_before.text, 'html.parser')
@@ -86,24 +100,32 @@ def scrape_boatrace_data(target_date, venue, race_num):
         if wind_match: env_data['風速'] = float(wind_match.group(1))
         if wave_match: env_data['波高'] = float(wave_match.group(1))
         
-        # 簡易風向（向かい風=1, 追い風=2, 横風=3, 無風=0）画像クラス等から取得がベストだがテキストベースでフォールバック
+        # 簡易風向
         if '向かい風' in before_text: env_data['風向'] = 1
         elif '追い風' in before_text: env_data['風向'] = 2
         else: env_data['風向'] = 0
             
+        # 展示タイム
         tbodies_before = soup_before.find_all('tbody', class_='is-fs12')
         for waku, tbody in enumerate(tbodies_before[:6], 1):
             t_text = tbody.text.replace('\n', ' ')
-            floats = re.findall(r'[-]?\d\.\d{1,2}', tbody.text)
+            floats = re.findall(r'[-]?\d\.\d{1,2}', t_text)
             if len(floats) >= 4:
                 boat_data[waku]['展示'] = float(floats[0]) if float(floats[0]) > 5.0 else 0.0
-            
-            # 展示STの取得（beforeinfoのテキスト構造に依存）
-            st_matches = re.findall(r'(F?0\.\d{2})', t_text)
-            if len(st_matches) >= 2:
-                # 平均STと展示STが混在するため、後者を展示STとする
-                try: boat_data[waku]['展示ST'] = float(st_matches[-1].replace('F', '-'))
-                except: pass
+        
+        # 🔥 展示STの正確な抽出（HTMLの専用クラスからピンポイント取得）
+        for w in range(1, 7):
+            time_span = soup_before.find('span', class_=f'table1_boatImage{w}TimeInner')
+            if not time_span:
+                time_span = soup_before.find('span', class_=f'table1_boatImage{w}Time')
+            if time_span:
+                st_text = time_span.text.strip()
+                # FやLの文字を消して純粋な小数に変換
+                val_str = re.sub(r'[A-Za-z]', '', st_text).replace('-', '')
+                try:
+                    if val_str: boat_data[w]['展示ST'] = float(val_str)
+                except:
+                    pass
 
         # スタート展示の進入コースを本番コースとする
         course_match = re.findall(r'(\d)コース', before_text)
@@ -185,7 +207,7 @@ def predict_race_auto_v23(target_date, venue, race_num):
         t_name = racer_names.get(boat_data[waku]['登番'], "")
         f_str = f" [F{boat_data[waku]['F持ち']}]" if boat_data[waku]['F持ち'] > 0 else ""
         c_actual = boat_data[waku]['進入コース']
-        score_details[waku] = f"舟券内AI確率: {ensemble_scores[i]*100:.1f}% (進入{c_actual} / 展ST {boat_data[waku]['展示ST']}){f_str}"
+        score_details[waku] = f"舟券内AI確率: {ensemble_scores[i]*100:.1f}% (進入{c_actual} / 展ST {boat_data[waku]['展示ST']:.2f} / {boat_data[waku]['体重']}kg){f_str}"
     
     p1_weights = []
     for i in range(1, 7):
@@ -264,7 +286,7 @@ with col2: venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=
 with col3: race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1, key="race1")
 
 if st.button("⚡ v23 フル覚醒AI予想！", type="primary"):
-    with st.spinner("展開データ（風向/F持ち/展示ST/進入）をスクレイピング・解析中..."):
+    with st.spinner("展開データ（風向/体重/F持ち/展示ST/進入）をスクレイピング・解析中..."):
         res_dict = predict_race_auto_v23(target_date, venue, race_num)
         if "error" in res_dict:
             st.error(f"【予想失敗】 {res_dict['error']}")
