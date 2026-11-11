@@ -145,7 +145,6 @@ def fetch_actual_result(target_date, jcd, race_num):
     except:
         return "通信エラー", 0
 
-# 🔥 プロフィール表示処理を関数化（どの画面からも呼び出せるように）
 def show_racer_profile(target_toban):
     has_data = False
     for c in range(1, 7):
@@ -285,14 +284,12 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
     ensemble_scores = (z_lgb + z_xgb) / 2.0
     
     score_details = {}
-    graph_data = [] 
     for i in range(6):
         waku = i + 1
         t_name = racer_names.get(boat_data[waku]['登番'], "")
         name_str = f" {t_name}" if t_name else ""
         c_actual = boat_data[waku]['進入コース']
         score_details[waku] = f"総合: {ensemble_scores[i]:.2f} (真の実力: {boat_data[waku]['true_skill']:+.3f} / {c_actual}ｺｰｽ3連対率: {boat_data[waku]['sanren_rate']:.1f}%)"
-        graph_data.append({"枠": f"{waku}枠{name_str}", "項目": "総合期待値", "スコア": round(ensemble_scores[i], 3)})
         
     win_probs = np.exp(ensemble_scores * 1.5) / np.sum(np.exp(ensemble_scores * 1.5))
     
@@ -384,9 +381,7 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
     result_text += f"👉 展開予想買い目（{len(bets)}点）: {', '.join(bets)}\n"
     result_text += "-" * 50 + "\n"
 
-    # 🔥 プロファイル用の生データも返すように変更
-    return {"text": result_text, "graph_data": pd.DataFrame(graph_data), "boat_data": boat_data}
-
+    return {"text": result_text, "boat_data": boat_data}
 
 st.title("🚤 ボートレースAI【v18 最終形態・メタ学習スナイパー】")
 
@@ -406,16 +401,8 @@ with tab1:
             if "error" in res_dict:
                 st.error(f"【予想失敗】 {res_dict['error']}")
             else:
-                st.text_area("AIのスコア解析結果", value=res_dict["text"], height=480)
-                df_graph = res_dict["graph_data"]
-                fig = px.bar(
-                    df_graph, x='枠', y='スコア', color='枠', barmode='group', template="plotly_dark",
-                    text_auto='.2f', color_discrete_sequence=['#ffffff', '#aaaaaa', '#ff4444', '#44aaff', '#ffee00', '#44ff44']
-                )
-                fig.update_layout(title="📊 AI総合期待値スコア（Z-score）", xaxis_title=None, yaxis_title="標準化スコア", legend_title="枠番")
-                st.plotly_chart(fig, use_container_width=True)
-
-                # 🔥 ここが追加部分！予想結果の下にプロフィール表示用のメニューを出す
+                st.text_area("AIのスコア解析結果", value=res_dict["text"], height=440)
+                
                 st.markdown("---")
                 st.markdown("### 👤 出走選手のディープ・プロファイル")
                 st.write("枠番・選手名をクリックすると、決まり手やイン崩壊率の詳細データが開きます。")
