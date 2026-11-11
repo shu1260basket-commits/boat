@@ -311,56 +311,66 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
         c_actual = boat_data[waku]['進入コース']
         score_details[waku] = f"舟券内AI確率: {ensemble_scores[i]*100:.1f}% (真の実力: {boat_data[waku]['true_skill']:+.3f} / {c_actual}ｺｰｽ3連対率: {boat_data[waku]['sanren_rate']:.1f}%)"
     
-    # 🔥 修正1：「1着の確率」をAIの3連対スコアから切り離し、選手の実際の「勝率」と「真の実力」でガチ計算
-    p1_scores = []
+    # 🔥 修正1：1着確率（P1）の厳密な算出（確率の合計を絶対に1にする）
+    p1_weights = []
     for i in range(1, 7):
         base_win = max(boat_data[i]['win_rate'], COURSE_AVG_1ST.get(boat_data[i]['進入コース'], 0.0))
-        skill_adj = max(0.01, base_win + (boat_data[i]['true_skill'] * 0.5))
-        p1_scores.append(skill_adj)
-    p1_probs = np.array(p1_scores) / sum(p1_scores)
-
-    # 🔥 修正2：「2着・3着の連対力」を、実績と実力を最優先（70%）して評価
-    survive_scores = []
-    for i in range(1, 7):
-        ai_val = ensemble_scores[i-1]
-        real_val = boat_data[i]['sanren_rate'] / 100.0
         skill = boat_data[i]['true_skill']
-        
-        blended = (ai_val * 0.3) + (real_val * 0.7)
-        bonus = 1.0 + max(0, skill * 3.0) # 実力者には強力な加点
-        survive_scores.append(blended * bonus)
+        # 実力とコース勝率で1着を決定
+        w = max(0.001, base_win * (1.0 + max(0, skill * 3.0)))
+        p1_weights.append(w)
+    
+    p1_probs = np.array(p1_weights) / sum(p1_weights)
+
+    # 🔥 修正2：2・3着力（ポテンシャル）の算出
+    place_weights = []
+    for i in range(1, 7):
+        ai_prob = ensemble_scores[i-1]
+        real_sanren = boat_data[i]['sanren_rate'] / 100.0
+        skill = boat_data[i]['true_skill']
+        # AIスコア（峰なら39%）と実績をブレンドし、実力で強烈にブースト
+        base_pot = (ai_prob * 0.5) + (real_sanren * 0.5)
+        pot = max(0.001, base_pot * (1.0 + max(0, skill * 5.0)))
+        place_weights.append(pot)
         
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
     
     for (r1, r2, r3) in combos:
-        w1, w2, w3 = r1 + 1, r2 + 1, r3 + 1
-        c1, c2, c3 = course_map[r1], course_map[r2], course_map[r3]
+        c1 = course_map[r1]
+        c2 = course_map[r2]
+        c3 = course_map[r3]
         
-        # 本命の確率（これでド平坦な2%台のバグが消滅する）
+        # 1着の確率（1.0から分配された正常な数値）
         p1 = p1_probs[r1]
         
-        s2 = survive_scores[r2]
-        s3 = survive_scores[r3]
+        # 2着の条件付き確率 (1着を除外して1.0になるよう再計算)
+        w2_list = []
+        for cand2 in range(6):
+            if cand2 == r1:
+                w2_list.append(0)
+            else:
+                c_cand2 = course_map[cand2]
+                suji = suji_stats['12_matrix'].get((c1, c_cand2), 0) / max(1, suji_stats['1st_count'].get(c1, 1))
+                # スジはあくまでスパイス（最低保証0.3を持たせることで峰のような実力者が消えない）
+                w2_list.append(place_weights[cand2] * (0.3 + suji * 0.7))
+        p2 = w2_list[r2] / max(0.0001, sum(w2_list))
         
-        # スジ評価 (1着→2着、1着→2着→3着)
-        c1_count = max(1, suji_stats['1st_count'].get(c1, 1))
-        suji2 = suji_stats['12_matrix'].get((c1, c2), 0) / c1_count
-        suji2 = max(0.1, suji2) # 🔥 スジのせいで実力者が消えないよう、最低保証を0.1に引き上げ
+        # 3着の条件付き確率 (1,2着を除外して1.0になるよう再計算)
+        w3_list = []
+        for cand3 in range(6):
+            if cand3 == r1 or cand3 == r2:
+                w3_list.append(0)
+            else:
+                c_cand3 = course_map[cand3]
+                suji = suji_stats['123_matrix'].get((c1, c2, c_cand3), 0) / max(1, suji_stats['12_matrix'].get((c1, c2), 1))
+                w3_list.append(place_weights[cand3] * (0.3 + suji * 0.7))
+        p3 = w3_list[r3] / max(0.0001, sum(w3_list))
         
-        c12_count = max(1, suji_stats['12_matrix'].get((c1, c2), 1))
-        suji3 = suji_stats['123_matrix'].get((c1, c2, c3), 0) / c12_count
-        suji3 = max(0.1, suji3)
-
-        # スジはあくまで「補正(0.6倍〜1.5倍)」にとどめ、選手の連対力(s2, s3)を最優先！
-        p2_eval = s2 * (0.5 + suji2)
-        p3_eval = s3 * (0.5 + suji3)
-
-        score = p1 * p2_eval * p3_eval
-             
-        raw_probs.append((f"{w1}-{w2}-{w3}", score))
+        score = p1 * p2 * p3
+        raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", score))
         
-    total_score = sum(x[1] for x in raw_probs)
+    total_score = sum(x[1] for x in raw_probs) # これが1.0に限りなく近くなる
     prob_sorted = sorted([(c, (s / total_score) * 100) for c, s in raw_probs], key=lambda x: x[1], reverse=True)
     
     top1_3t_prob = prob_sorted[0][1]
@@ -370,7 +380,6 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
     ken_reason = ""
     is_ken = False
 
-    # 確率が正常に戻ったため、見送り基準も12%に再調整
     if top1_3t_prob < 12.0:
         is_ken = True
         ken_reason = "展開が混戦すぎる（大本命不在によるオッズ割れ・トリガミの危険）"
