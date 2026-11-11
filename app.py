@@ -145,6 +145,69 @@ def fetch_actual_result(target_date, jcd, race_num):
     except:
         return "通信エラー", 0
 
+# 🔥 プロフィール表示処理を関数化（どの画面からも呼び出せるように）
+def show_racer_profile(target_toban):
+    has_data = False
+    for c in range(1, 7):
+        if (target_toban, c) in racer_course_stats and racer_course_stats[(target_toban, c)]['runs'] > 0:
+            has_data = True
+            break
+            
+    if not has_data:
+        st.warning(f"⚠️ 登番 {target_toban} のデータは過去の集計期間内に存在しません。（新人選手、または未出走）")
+        return
+        
+    racer_name = racer_names.get(target_toban, "")
+    
+    total_runs, total_wins, total_value_added, in_runs, in_crash = 0, 0, 0.0, 0, 0
+    course_data = []
+    
+    for c in range(1, 7):
+        c_st = racer_course_stats.get((target_toban, c), {'runs':0, '1st':0, '2nd':0, '3rd':0, '4th6th':0})
+        runs, wins = c_st['runs'], c_st['1st']
+        
+        total_runs += runs
+        total_wins += wins
+        total_value_added += wins - (runs * COURSE_AVG_1ST.get(c, 0.0))
+        
+        if c == 1:
+            in_runs = runs
+            in_crash = c_st['4th6th']
+            
+        win_rate = (wins / runs * 100) if runs > 0 else 0.0
+        ren_rate = ((wins + c_st['2nd']) / runs * 100) if runs > 0 else 0.0
+        sanren_rate = ((wins + c_st['2nd'] + c_st['3rd']) / runs * 100) if runs > 0 else 0.0
+        
+        k_stats = racer_kimarite.get((target_toban, c), {'nige':0, 'sashi':0, 'makuri':0, 'makurisashi':0})
+        
+        course_data.append({
+            "進入コース": f"{c}コース",
+            "出走回数": runs,
+            "1着率": f"{win_rate:.1f}%",
+            "2連対率": f"{ren_rate:.1f}%",
+            "3連対率": f"{sanren_rate:.1f}%",
+            "逃げ": k_stats['nige'],
+            "差し": k_stats['sashi'],
+            "まくり": k_stats['makuri'],
+            "まくり差し": k_stats['makurisashi']
+        })
+        
+    true_skill_score = total_value_added / max(1, total_runs)
+    fake_a1_rate = (in_crash / in_runs * 100) if in_runs > 0 else 0.0
+    
+    in_f_stats = racer_in_fail.get(target_toban, {'runs_1c':0, 'sasare':0, 'makurare':0})
+    sasare_rate = (in_f_stats['sasare'] / max(1, in_f_stats['runs_1c']) * 100) if in_f_stats['runs_1c'] > 0 else 0.0
+    makurare_rate = (in_f_stats['makurare'] / max(1, in_f_stats['runs_1c']) * 100) if in_f_stats['runs_1c'] > 0 else 0.0
+    
+    col1, col2, col3, col4 = st.columns(4)
+    col1.metric("総出走数 (集計期間)", f"{total_runs}走")
+    col2.metric("🏆 真の実力値 (0基準)", f"{true_skill_score:+.3f}", help="プラスなら全国平均以上。外枠からでも勝てる本物の実力を示します。")
+    col3.metric("🚨 イン崩壊率 (4着以下)", f"{fake_a1_rate:.1f}%", help="1コースに入ったのに舟券外に飛ぶ確率（A1詐欺度）です。")
+    col4.metric("💥 1コースで負ける時の特徴", f"差され: {sasare_rate:.0f}% / まくられ: {makurare_rate:.0f}%")
+    
+    df_course = pd.DataFrame(course_data)
+    st.dataframe(df_course.set_index("進入コース"), use_container_width=True)
+
 def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
     boat_data, env_data, success, msg = scrape_boatrace_data(target_date, venue, race_num)
     if not success: return {"error": msg}
@@ -206,7 +269,6 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
         ordered_dict = {col: input_dict.get(col, 0.0) for col in train_features}
         input_list.append(ordered_dict)
         
-        # 🔥 表示用に真の実力と3連対率を保存
         c_st_display = racer_course_stats.get((toban, course), {'runs':0, '1st':0, '2nd':0, '3rd':0, '4th6th':0})
         runs_display = c_st_display['runs']
         sanren_count = c_st_display['1st'] + c_st_display['2nd'] + c_st_display['3rd']
@@ -229,8 +291,6 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
         t_name = racer_names.get(boat_data[waku]['登番'], "")
         name_str = f" {t_name}" if t_name else ""
         c_actual = boat_data[waku]['進入コース']
-        
-        # 🔥 スコア詳細に「◯コース3連対率: ◯%」を追加
         score_details[waku] = f"総合: {ensemble_scores[i]:.2f} (真の実力: {boat_data[waku]['true_skill']:+.3f} / {c_actual}ｺｰｽ3連対率: {boat_data[waku]['sanren_rate']:.1f}%)"
         graph_data.append({"枠": f"{waku}枠{name_str}", "項目": "総合期待値", "スコア": round(ensemble_scores[i], 3)})
         
@@ -324,7 +384,9 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
     result_text += f"👉 展開予想買い目（{len(bets)}点）: {', '.join(bets)}\n"
     result_text += "-" * 50 + "\n"
 
-    return {"text": result_text, "graph_data": pd.DataFrame(graph_data)}
+    # 🔥 プロファイル用の生データも返すように変更
+    return {"text": result_text, "graph_data": pd.DataFrame(graph_data), "boat_data": boat_data}
+
 
 st.title("🚤 ボートレースAI【v18 最終形態・メタ学習スナイパー】")
 
@@ -352,6 +414,18 @@ with tab1:
                 )
                 fig.update_layout(title="📊 AI総合期待値スコア（Z-score）", xaxis_title=None, yaxis_title="標準化スコア", legend_title="枠番")
                 st.plotly_chart(fig, use_container_width=True)
+
+                # 🔥 ここが追加部分！予想結果の下にプロフィール表示用のメニューを出す
+                st.markdown("---")
+                st.markdown("### 👤 出走選手のディープ・プロファイル")
+                st.write("枠番・選手名をクリックすると、決まり手やイン崩壊率の詳細データが開きます。")
+                
+                boat_data = res_dict["boat_data"]
+                for waku in range(1, 7):
+                    toban = boat_data[waku]['登番']
+                    r_name = racer_names.get(toban, "")
+                    with st.expander(f"🚤 {waku}枠: {r_name} (登番: {toban}) のデータを見る"):
+                        show_racer_profile(toban)
 
 with tab2:
     st.write("AIが「ケン」と判定したレースも強制的に資金を投じて、仮に買っていた場合の収支を全て記録します。")
@@ -489,66 +563,4 @@ with tab4:
     target_toban = st.number_input("選手の登番を入力 (例: 4320)", min_value=1000, max_value=9999, value=4320, step=1)
     
     if st.button("🔍 選手データを解析する", type="primary"):
-        has_data = False
-        for c in range(1, 7):
-            if (target_toban, c) in racer_course_stats and racer_course_stats[(target_toban, c)]['runs'] > 0:
-                has_data = True
-                break
-                
-        if not has_data:
-            st.warning(f"⚠️ 登番 {target_toban} のデータは過去の集計期間内に存在しません。（新人選手、または未出走）")
-        else:
-            racer_name = racer_names.get(target_toban, "")
-            name_display = f"（{racer_name}）" if racer_name else ""
-            
-            total_runs, total_wins, total_value_added, in_runs, in_crash = 0, 0, 0.0, 0, 0
-            course_data = []
-            
-            for c in range(1, 7):
-                c_st = racer_course_stats.get((target_toban, c), {'runs':0, '1st':0, '2nd':0, '3rd':0, '4th6th':0})
-                runs, wins = c_st['runs'], c_st['1st']
-                
-                total_runs += runs
-                total_wins += wins
-                total_value_added += wins - (runs * COURSE_AVG_1ST.get(c, 0.0))
-                
-                if c == 1:
-                    in_runs = runs
-                    in_crash = c_st['4th6th']
-                    
-                win_rate = (wins / runs * 100) if runs > 0 else 0.0
-                ren_rate = ((wins + c_st['2nd']) / runs * 100) if runs > 0 else 0.0
-                sanren_rate = ((wins + c_st['2nd'] + c_st['3rd']) / runs * 100) if runs > 0 else 0.0
-                
-                k_stats = racer_kimarite.get((target_toban, c), {'nige':0, 'sashi':0, 'makuri':0, 'makurisashi':0})
-                
-                course_data.append({
-                    "進入コース": f"{c}コース",
-                    "出走回数": runs,
-                    "1着率": f"{win_rate:.1f}%",
-                    "2連対率": f"{ren_rate:.1f}%",
-                    "3連対率": f"{sanren_rate:.1f}%",
-                    "逃げ": k_stats['nige'],
-                    "差し": k_stats['sashi'],
-                    "まくり": k_stats['makuri'],
-                    "まくり差し": k_stats['makurisashi']
-                })
-                
-            true_skill_score = total_value_added / max(1, total_runs)
-            fake_a1_rate = (in_crash / in_runs * 100) if in_runs > 0 else 0.0
-            
-            in_f_stats = racer_in_fail.get(target_toban, {'runs_1c':0, 'sasare':0, 'makurare':0})
-            sasare_rate = (in_f_stats['sasare'] / max(1, in_f_stats['runs_1c']) * 100)
-            makurare_rate = (in_f_stats['makurare'] / max(1, in_f_stats['runs_1c']) * 100)
-            
-            st.success(f"✅ 登番 {target_toban} {name_display} のプロファイル抽出完了！")
-            
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("総出走数 (集計期間)", f"{total_runs}走")
-            col2.metric("🏆 真の実力値 (0基準)", f"{true_skill_score:+.3f}", help="プラスなら全国平均以上。外枠からでも勝てる本物の実力を示します。")
-            col3.metric("🚨 イン崩壊率 (4着以下)", f"{fake_a1_rate:.1f}%", help="1コースに入ったのに舟券外に飛ぶ確率（A1詐欺度）です。")
-            col4.metric("💥 1コースで負ける時の特徴", f"差され: {sasare_rate:.0f}% / まくられ: {makurare_rate:.0f}%")
-            
-            st.markdown("### 📊 コース別 成績 ＆ 決まり手（得意戦法）")
-            df_course = pd.DataFrame(course_data)
-            st.dataframe(df_course.set_index("進入コース"), use_container_width=True)
+        show_racer_profile(target_toban)
