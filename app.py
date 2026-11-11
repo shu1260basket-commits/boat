@@ -17,7 +17,6 @@ st.set_page_config(page_title="ボートレースAI【v18 最終形態・スナ�
 
 @st.cache_resource
 def load_brain():
-    # 🔥 新しく作ったv18の脳みそをロード
     with open('boat_ai_brain_v18_final.pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return saved_data
@@ -32,7 +31,7 @@ try:
     motor_stats = brain['motor_stats']
     racer_kimarite = brain['racer_kimarite']
     racer_in_fail = brain['racer_in_fail']
-    racer_names = brain.get('racer_names', {}) # 🔥 脳みそから直接名前を引き出す！
+    racer_names = brain.get('racer_names', {})
     suji_stats = brain['suji_stats']
     COURSE_AVG_1ST = brain['course_avg_1st']
     sweet_spots = brain.get('sweet_spots', {})
@@ -206,6 +205,14 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
         }
         ordered_dict = {col: input_dict.get(col, 0.0) for col in train_features}
         input_list.append(ordered_dict)
+        
+        # 🔥 表示用に真の実力と3連対率を保存
+        c_st_display = racer_course_stats.get((toban, course), {'runs':0, '1st':0, '2nd':0, '3rd':0, '4th6th':0})
+        runs_display = c_st_display['runs']
+        sanren_count = c_st_display['1st'] + c_st_display['2nd'] + c_st_display['3rd']
+        sanren_rate = (sanren_count / runs_display * 100) if runs_display > 0 else 0.0
+        boat_data[waku]['true_skill'] = true_skill_score
+        boat_data[waku]['sanren_rate'] = sanren_rate
 
     X_pred = pd.DataFrame(input_list)[train_features]
     
@@ -221,7 +228,10 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
         waku = i + 1
         t_name = racer_names.get(boat_data[waku]['登番'], "")
         name_str = f" {t_name}" if t_name else ""
-        score_details[waku] = f"総合: {ensemble_scores[i]:.2f} (真の実力: {input_list[i].get('真の実力値', 0):+.3f})"
+        c_actual = boat_data[waku]['進入コース']
+        
+        # 🔥 スコア詳細に「◯コース3連対率: ◯%」を追加
+        score_details[waku] = f"総合: {ensemble_scores[i]:.2f} (真の実力: {boat_data[waku]['true_skill']:+.3f} / {c_actual}ｺｰｽ3連対率: {boat_data[waku]['sanren_rate']:.1f}%)"
         graph_data.append({"枠": f"{waku}枠{name_str}", "項目": "総合期待値", "スコア": round(ensemble_scores[i], 3)})
         
     win_probs = np.exp(ensemble_scores * 1.5) / np.sum(np.exp(ensemble_scores * 1.5))
@@ -488,7 +498,6 @@ with tab4:
         if not has_data:
             st.warning(f"⚠️ 登番 {target_toban} のデータは過去の集計期間内に存在しません。（新人選手、または未出走）")
         else:
-            # 🔥 辞書から選手名を一瞬で取得（通信一切不要！）
             racer_name = racer_names.get(target_toban, "")
             name_display = f"（{racer_name}）" if racer_name else ""
             
@@ -509,6 +518,7 @@ with tab4:
                     
                 win_rate = (wins / runs * 100) if runs > 0 else 0.0
                 ren_rate = ((wins + c_st['2nd']) / runs * 100) if runs > 0 else 0.0
+                sanren_rate = ((wins + c_st['2nd'] + c_st['3rd']) / runs * 100) if runs > 0 else 0.0
                 
                 k_stats = racer_kimarite.get((target_toban, c), {'nige':0, 'sashi':0, 'makuri':0, 'makurisashi':0})
                 
@@ -517,6 +527,7 @@ with tab4:
                     "出走回数": runs,
                     "1着率": f"{win_rate:.1f}%",
                     "2連対率": f"{ren_rate:.1f}%",
+                    "3連対率": f"{sanren_rate:.1f}%",
                     "逃げ": k_stats['nige'],
                     "差し": k_stats['sashi'],
                     "まくり": k_stats['makuri'],
