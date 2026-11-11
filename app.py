@@ -297,13 +297,10 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
 
     X_pred = pd.DataFrame(input_list)[train_features]
     
-    # 🔥 v20はClassifierなので predict_proba を使用して「3着内率」を直接出す
     lgb_probs = model_lgb.predict_proba(X_pred)[:, 1]
     xgb_probs = model_xgb.predict_proba(X_pred)[:, 1]
     
     ensemble_scores = (lgb_probs + xgb_probs) / 2.0
-    
-    # これがそのまま「AIが弾き出した3着内率（ベース）」になる
     win_probs = ensemble_scores / np.sum(ensemble_scores)
     
     score_details = {}
@@ -320,27 +317,29 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
         w1, w2, w3 = r1 + 1, r2 + 1, r3 + 1
         c1, c2, c3 = course_map[r1], course_map[r2], course_map[r3]
         
+        # 1着はAIの予測確率を使用
         p1 = win_probs[r1]
         
-        # 🔥 実力者（峰竜太など）を強引に引き上げる！元のAIスコアに縛られず3連対率と真の実力を最優先
-        sanren_p2 = max(0.01, boat_data[w2]['sanren_rate'] / 100.0)
-        sanren_p3 = max(0.01, boat_data[w3]['sanren_rate'] / 100.0)
-        skill_bonus2 = 1.0 + max(0, boat_data[w2]['true_skill'] * 3.0) 
-        skill_bonus3 = 1.0 + max(0, boat_data[w3]['true_skill'] * 3.0) 
+        # 🔥 実力者補正：真の実力が高い選手は、2着・3着の評価を暴力的に引き上げる
+        skill_bonus2 = 1.0 + max(0, boat_data[w2]['true_skill'] * 5.0) 
+        skill_bonus3 = 1.0 + max(0, boat_data[w3]['true_skill'] * 5.0)
         
+        # AIスコアベース
+        base_p2 = win_probs[r2] / max(0.0001, 1.0 - win_probs[r1])
+        base_p3 = win_probs[r3] / max(0.0001, 1.0 - win_probs[r1] - win_probs[r2])
+        
+        # スジ出現率
         c1_count = max(1, suji_stats['1st_count'].get(c1, 1))
         p2_suji = max(0.01, suji_stats['12_matrix'].get((c1, c2), 0) / c1_count) 
         c12_count = max(1, suji_stats['12_matrix'].get((c1, c2), 1))
         p3_suji = max(0.01, suji_stats['123_matrix'].get((c1, c2, c3), 0) / c12_count)
 
-        # AIスコア（3着内率）＋ 実際の3連対実績 ＋ スジ
-        p2_pl = (win_probs[r2] * 0.1) + (sanren_p2 * skill_bonus2 * p2_suji * 0.9)
-        p3_pl = (win_probs[r3] * 0.1) + (sanren_p3 * skill_bonus3 * p3_suji * 0.9)
+        # 🔥 スジの影響力を弱め、選手個人の実力を最優先する計算
+        # 従来の「スジ掛け算」ではなく、「実力×AI確率」をベースにスジは微調整のみに留める
+        p2_eval = base_p2 * skill_bonus2 * (0.5 + p2_suji * 0.5)
+        p3_eval = base_p3 * skill_bonus3 * (0.5 + p3_suji * 0.5)
 
-        score = p1 * p2_pl * p3_pl
-        
-        if p1 > 0.4 and (p2_suji < 0.05 or p3_suji < 0.05):
-             score = score * 0.5 
+        score = p1 * p2_eval * p3_eval
              
         raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", score))
         
@@ -390,7 +389,6 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
     result_text = f"🌐 【v20 連対至上主義スナイパー】解析完了！\n"
     result_text += f"🌪️ 水面環境: {venue} / {current_season} / 風速 {env_data['風速']}m ({wind_cat})\n"
     result_text += f"🧠 この条件でのAI過去的中率: {ai_historical_hit_rate:.1f}%\n"
-    result_text += f"🎯 AI推奨 3連単1番人気 信頼度: {top1_3t_prob:.1f}%\n\n"
     
     if is_ken:
         result_text += f"⚠️ 【AI判定: ケン（見送り）】\n⛔ 理由: {ken_reason}\n\n"
@@ -404,7 +402,7 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
         name_str = f" {t_name}" if t_name else ""
         result_text += f"{i}枠{name_str}: 【{detail}】\n"
         
-    result_text += f"\n🎯 【スジ完全同期】3連単 上位8点予想\n"
+    result_text += f"\n🎯 【実力＆スジ完全同期】3連単 上位8点予想\n"
     result_text += "-" * 50 + "\n"
     for i in range(min(8, len(prob_sorted))):
         result_text += f"第{i+1}推奨: 【{prob_sorted[i][0]}】 (確率 {prob_sorted[i][1]:.1f}%)\n"
