@@ -12,10 +12,11 @@ import itertools
 import time
 import concurrent.futures 
 
-st.set_page_config(page_title="ボートレースAI【v20 連対至上主義スナイパー】", layout="wide")
+st.set_page_config(page_title="ボートレースAI【v21 最終分離スナイパー】", layout="wide")
 
 @st.cache_resource
 def load_brain():
+    # 脳みそはv20（3着内率特化モデル）をそのまま使用！
     with open('boat_ai_brain_v20.pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return saved_data
@@ -299,7 +300,7 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
 
     X_pred = pd.DataFrame(input_list)[train_features]
     
-    # 舟券内に入るAI確率 (純粋なAIの推論結果)
+    # AIが予測した「3着以内に入る確率」
     lgb_probs = model_lgb.predict_proba(X_pred)[:, 1]
     xgb_probs = model_xgb.predict_proba(X_pred)[:, 1]
     ensemble_scores = (lgb_probs + xgb_probs) / 2.0
@@ -311,28 +312,37 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
         c_actual = boat_data[waku]['進入コース']
         score_details[waku] = f"舟券内AI確率: {ensemble_scores[i]*100:.1f}% (真の実力: {boat_data[waku]['true_skill']:+.3f} / {c_actual}ｺｰｽ3連対率: {boat_data[waku]['sanren_rate']:.1f}%)"
     
-    # 🔥 クリーンな1着確率の算出（余計なバフを廃止）
-    p1_scores = []
+    # 🔥 1着確率（アタマ）：AIの3着内率は無視し、純粋な「1着力」だけで算出
+    p1_weights = []
     for i in range(1, 7):
-        base_win = max(0.001, boat_data[i]['win_rate'])
-        # AIが評価した舟券内確率とコース勝率を掛けてベースを作る
-        p1_scores.append(base_win * ensemble_scores[i-1])
-    
-    p1_probs = np.array(p1_scores) / sum(p1_scores) # 合計1.0に正規化
+        base_win = max(boat_data[i]['win_rate'], COURSE_AVG_1ST.get(boat_data[i]['進入コース'], 0.0))
+        skill = boat_data[i]['true_skill']
+        # 1着はコース勝率と実力だけで決める（堅いレースを取りこぼさないため）
+        w = max(0.001, base_win * (1.0 + max(0, skill * 1.5)))
+        p1_weights.append(w)
+    p1_probs = np.array(p1_weights) / sum(p1_weights)
 
+    # 🔥 2・3着確率（ヒモ）：AIが弾き出した「3着内率（ensemble_scores）」を最優先！
+    potentials = []
+    for i in range(1, 7):
+        ai_prob = ensemble_scores[i-1] 
+        skill = boat_data[i]['true_skill']
+        # 3着内に残る力（AIの評価をベースに、実力者を少しだけ底上げ）
+        potentials.append(ai_prob * (1.0 + max(0, skill * 2.0)))
+        
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
     
-    # 🔥 クリーンな条件付き確率（数学的に完璧な足し算ブレンド）
+    # 条件付き確率の計算（合計が完璧に100%になる）
     for (r1, r2, r3) in combos:
         c1 = course_map[r1]
         c2 = course_map[r2]
         c3 = course_map[r3]
         
-        # P(1着)
+        # P(1着) = 1着専用の確率
         P1 = p1_probs[r1]
         
-        # P(2着 | 1着)
+        # P(2着 | 1着) = 2着・3着専用のポテンシャル（AI評価）を使用
         w2_list = []
         for cand2 in range(6):
             if cand2 == r1:
@@ -340,10 +350,9 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
             else:
                 c_cand2 = course_map[cand2]
                 suji2 = suji_stats['12_matrix'].get((c1, c_cand2), 0) / max(1, suji_stats['1st_count'].get(c1, 1))
-                # AIの評価スコアをベースに、スジで最大+2.0倍のボーナス（最低1.0倍を保証）
-                w2_list.append(ensemble_scores[cand2] * (1.0 + suji2 * 2.0))
-        
-        P2 = w2_list[r2] / sum(w2_list) # 残りの5艇の中で正規化
+                # スジはあくまでスパイス（AI評価を崩さない程度）
+                w2_list.append(potentials[cand2] * (1.0 + suji2 * 2.0))
+        P2 = w2_list[r2] / max(0.0001, sum(w2_list))
         
         # P(3着 | 1, 2着)
         w3_list = []
@@ -353,15 +362,12 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
             else:
                 c_cand3 = course_map[cand3]
                 suji3 = suji_stats['123_matrix'].get((c1, c2, c_cand3), 0) / max(1, suji_stats['12_matrix'].get((c1, c2), 1))
-                w3_list.append(ensemble_scores[cand3] * (1.0 + suji3 * 2.0))
-                
-        P3 = w3_list[r3] / sum(w3_list) # 残りの4艇の中で正規化
+                w3_list.append(potentials[cand3] * (1.0 + suji3 * 2.0))
+        P3 = w3_list[r3] / max(0.0001, sum(w3_list))
         
-        # 最終的な買い目の確率
         score = P1 * P2 * P3
         raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", score))
         
-    # これで全120通りの合計がピッタリ 1.0 (100%) になる！
     prob_sorted = sorted([(c, s * 100) for c, s in raw_probs], key=lambda x: x[1], reverse=True)
     
     top1_3t_prob = prob_sorted[0][1]
@@ -371,8 +377,7 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
     ken_reason = ""
     is_ken = False
 
-    # 的中率のバランスが戻ったため、見送り基準も標準的な12.0%に設定
-    if top1_3t_prob < 12.0:
+    if top1_3t_prob < 15.0:
         is_ken = True
         ken_reason = "展開が混戦すぎる（大本命不在によるオッズ割れ・トリガミの危険）"
         bet_type_name = "🎯 展開スジ狙い（フォーメーション8点）"
@@ -391,7 +396,7 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
     if is_ken:
         bet_type_name = f"⚠️ 見送り推奨 (仮の買い目: {bet_type_name})"
 
-    is_easy_hit = (top1_3t_prob >= 12.0) and not is_ken
+    is_easy_hit = (top1_3t_prob >= 15.0) and not is_ken
 
     if is_backtest:
         return {
@@ -405,7 +410,7 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
             "ai_hit_rate": ai_historical_hit_rate
         }
     
-    result_text = f"🌐 【v20 連対至上主義スナイパー】解析完了！\n"
+    result_text = f"🌐 【v21 最終分離スナイパー】解析完了！\n"
     result_text += f"🌪️ 水面環境: {venue} / {current_season} / 風速 {env_data['風速']}m ({wind_cat})\n"
     result_text += f"🧠 この条件でのAI過去的中率: {ai_historical_hit_rate:.1f}%\n"
     
@@ -433,7 +438,7 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
 
     return {"text": result_text, "boat_data": boat_data}
 
-st.title("🚤 ボートレースAI【v20 連対至上主義スナイパー】")
+st.title("🚤 ボートレースAI【v21 最終分離スナイパー】")
 
 tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 厳格バックテスト", "🎯 全国スナイパー"])
 today_str = datetime.datetime.now().strftime('%Y%m%d')
@@ -445,7 +450,7 @@ with tab1:
     with col2: venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=9, key="venue1")
     with col3: race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1, key="race1")
 
-    if st.button("⚡ v20 連対至上主義AI予想！", type="primary"):
+    if st.button("⚡ v21 最終分離AI予想！", type="primary"):
         with st.spinner("AIのスイートスポットを照合し、展開を計算中..."):
             res_dict = predict_race_auto_v20(target_date, venue, race_num)
             if "error" in res_dict:
