@@ -10,13 +10,12 @@ import datetime
 import re
 import itertools
 import time
-import concurrent.futures 
 
-st.set_page_config(page_title="ボートレースAI【v22 軽量アルティメット】", layout="wide")
+st.set_page_config(page_title="ボートレースAI【v23 フル覚醒スナイパー】", layout="wide")
 
 @st.cache_resource
 def load_brain():
-    with open('boat_ai_brain_v22_light.pkl', 'rb') as f:
+    with open('boat_ai_brain_v23.pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return saved_data
 
@@ -32,7 +31,7 @@ try:
     suji_stats = brain['suji_stats']
     COURSE_AVG_1ST = brain['course_avg_1st']
 except Exception as e:
-    st.error(f"⚠️ `boat_ai_brain_v22_light.pkl` の読み込みエラー: {e}")
+    st.error(f"⚠️ `boat_ai_brain_v23.pkl` の読み込みエラー: {e}")
     st.stop()
 
 VENUE_MAP = {
@@ -47,11 +46,6 @@ retries = Retry(total=3, backoff_factor=1, status_forcelist=[403, 500, 502, 503,
 session.mount('https://', HTTPAdapter(max_retries=retries, pool_connections=20, pool_maxsize=20))
 session.headers.update({'User-Agent': 'Mozilla/5.0'})
 
-def get_wind_category(wind_speed):
-    if wind_speed <= 2: return "0-2m(穏やか)"
-    elif wind_speed <= 4: return "3-4m(普通)"
-    else: return "5m以上(荒れ)"
-
 def scrape_boatrace_data(target_date, venue, race_num):
     clean_date = str(target_date).replace("-", "").replace("/", "")
     jcd_str = str(VENUE_MAP[venue]).zfill(2)
@@ -59,25 +53,29 @@ def scrape_boatrace_data(target_date, venue, race_num):
     url_before = f"https://www.boatrace.jp/owpc/pc/race/beforeinfo?rno={int(race_num)}&jcd={jcd_str}&hd={clean_date}"
     
     boat_data = {}
-    env_data = {'風速': 0.0, '波高': 0.0}
+    env_data = {'風速': 0.0, '波高': 0.0, '風向': 0}
     
     try:
+        # 出走表（体重、F数）
         res_list = session.get(url_list, timeout=15)
         res_list.encoding = 'utf-8'
-        if res_list.status_code != 200: return None, None, False, f"通信ブロック ({res_list.status_code})"
-
         soup_list = BeautifulSoup(res_list.text, 'html.parser')
         tbodies_list = soup_list.find_all('tbody', class_='is-fs12')
-        if len(tbodies_list) < 6: return None, None, False, "休催日 または データ未公開"
             
         for waku, tbody in enumerate(tbodies_list[:6], 1):
             text_data = tbody.text.replace('\n', ' ')
             toban = int(re.search(r'(\d{4})', text_data).group(1)) if re.search(r'(\d{4})', text_data) else 0
+            
+            # 体重とF数
+            weight = float(re.search(r'(\d{2}\.\d)kg', text_data).group(1)) if re.search(r'(\d{2}\.\d)kg', text_data) else 51.0
+            f_count = int(re.search(r'F(\d)', text_data).group(1)) if re.search(r'F(\d)', text_data) else 0
+            
             try: motor = int(re.findall(r'\b(\d{1,3})\b', tbody.text)[-6])
             except: motor = 0
-            boat_data[waku] = {'登番': toban, 'モーター': motor, '展示': 0.0, '進入コース': waku, '平均ST': 0.17}
+            boat_data[waku] = {'登番': toban, 'モーター': motor, '体重': weight, 'F持ち': f_count, '展示': 0.0, '進入コース': waku, '平均ST': 0.17, '展示ST': 0.17}
             
         time.sleep(0.5) 
+        # 直前情報（展示タイム、展示ST、風向）
         res_before = session.get(url_before, timeout=15)
         res_before.encoding = 'utf-8'
         soup_before = BeautifulSoup(res_before.text, 'html.parser')
@@ -87,6 +85,11 @@ def scrape_boatrace_data(target_date, venue, race_num):
         wave_match = re.search(r'波.*?(\d+)cm', before_text)
         if wind_match: env_data['風速'] = float(wind_match.group(1))
         if wave_match: env_data['波高'] = float(wave_match.group(1))
+        
+        # 簡易風向（向かい風=1, 追い風=2, 横風=3, 無風=0）画像クラス等から取得がベストだがテキストベースでフォールバック
+        if '向かい風' in before_text: env_data['風向'] = 1
+        elif '追い風' in before_text: env_data['風向'] = 2
+        else: env_data['風向'] = 0
             
         tbodies_before = soup_before.find_all('tbody', class_='is-fs12')
         for waku, tbody in enumerate(tbodies_before[:6], 1):
@@ -94,10 +97,15 @@ def scrape_boatrace_data(target_date, venue, race_num):
             floats = re.findall(r'[-]?\d\.\d{1,2}', tbody.text)
             if len(floats) >= 4:
                 boat_data[waku]['展示'] = float(floats[0]) if float(floats[0]) > 5.0 else 0.0
-            st_match = re.findall(r'0\.\d{2}', t_text)
-            if st_match:
-                boat_data[waku]['平均ST'] = float(st_match[0]) 
+            
+            # 展示STの取得（beforeinfoのテキスト構造に依存）
+            st_matches = re.findall(r'(F?0\.\d{2})', t_text)
+            if len(st_matches) >= 2:
+                # 平均STと展示STが混在するため、後者を展示STとする
+                try: boat_data[waku]['展示ST'] = float(st_matches[-1].replace('F', '-'))
+                except: pass
 
+        # スタート展示の進入コースを本番コースとする
         course_match = re.findall(r'(\d)コース', before_text)
         if len(course_match) >= 6:
             for i, c in enumerate(course_match[:6]):
@@ -108,13 +116,11 @@ def scrape_boatrace_data(target_date, venue, race_num):
     except Exception as e:
         return None, None, False, f"通信/解析エラー: {str(e)}"
 
-def predict_race_auto_v22(target_date, venue, race_num, is_backtest=False):
+def predict_race_auto_v23(target_date, venue, race_num):
     boat_data, env_data, success, msg = scrape_boatrace_data(target_date, venue, race_num)
     if not success: return {"error": msg}
     
     jcd = int(VENUE_MAP[venue])
-    wind_cat = get_wind_category(env_data['風速'])
-    
     st_array = [boat_data[w]['平均ST'] for w in range(1, 7)]
     tenji_array = [boat_data[w]['展示'] for w in range(1, 7)]
     tenji_mean = np.mean(tenji_array)
@@ -127,20 +133,14 @@ def predict_race_auto_v22(target_date, venue, race_num, is_backtest=False):
         motor = boat_data[waku]['モーター']
         course = boat_data[waku]['進入コース']
         
-        total_runs_all, total_value_added, in_crash, in_runs_total = 0, 0.0, 0, 0
+        total_runs_all, total_value = 0, 0.0
         for c in range(1, 7):
-            c_st = racer_course_stats.get((toban, c), {'runs':0, '1st':0, '2nd':0, '3rd':0, '4th6th':0})
-            runs, wins = c_st['runs'], c_st['1st']
-            total_runs_all += runs
-            total_value_added += wins - (runs * COURSE_AVG_1ST.get(c, 0.0))
-            if c == 1:
-                in_runs_total = runs
-                in_crash = c_st['4th6th']
+            c_st = racer_course_stats.get((toban, c), {'runs':0, '1st':0, '2nd':0, '3rd':0})
+            total_runs_all += c_st['runs']
+            total_value += c_st['1st'] - (c_st['runs'] * COURSE_AVG_1ST.get(c, 0.0))
 
-        true_skill_score = total_value_added / max(1, total_runs_all)
-        fake_a1_rate = (in_crash / in_runs_total) if in_runs_total > 0 else 0.0
-
-        c_stats = racer_course_stats.get((toban, course), {'runs':1, '1st':0, '2nd':0, '3rd':0, '4th6th':0})
+        true_skill = total_value / max(1, total_runs_all)
+        c_stats = racer_course_stats.get((toban, course), {'runs':1, '1st':0, '2nd':0, '3rd':0})
         v_stats = racer_venue_stats.get((toban, jcd), {'runs':1, '1st':0, '2nd':0})
         m_stats = motor_stats.get((jcd, motor), {'runs':1, '1st':0, '2nd':0})
         
@@ -150,31 +150,31 @@ def predict_race_auto_v22(target_date, venue, race_num, is_backtest=False):
         sanren_rate = (c_stats['1st'] + c_stats['2nd'] + c_stats['3rd']) / runs_c
 
         input_dict = {
-            '会場ID': jcd, # 🔥 会場ごとの違いを判定
-            '枠番': waku, '進入コース': course, '展示': boat_data[waku]['展示'], '平均ST': boat_data[waku]['平均ST'],
-            '風速': env_data['風速'], '波高': env_data['波高'],
+            '会場ID': jcd,
+            'レース番号': race_num,
+            '枠番': waku, '進入コース': course, 
+            '風速': env_data['風速'], '風向': env_data['風向'], '波高': env_data['波高'],
             'コース1着率': win_rate,
             'コース3連対率': sanren_rate,
             '当地1着率': v_stats['1st'] / max(1, v_stats['runs']),
             'モーター2連対率': (m_stats['1st'] + m_stats['2nd']) / max(1, m_stats['runs']),
-            'まくり比率': 0, '差し比率': 0,
-            '真の実力値': true_skill_score, 'イン崩壊率': fake_a1_rate,
+            '真の実力値': true_skill,
             '内側ST差': boat_data[waku]['平均ST'] - inside_st, 
-            '展示平均差': boat_data[waku]['展示'] - tenji_mean # 🔥 モーターの今節気配
+            '展示平均差': boat_data[waku]['展示'] - tenji_mean,
+            'F持ち': boat_data[waku]['F持ち'],
+            '体重': boat_data[waku]['体重'],
+            '展示ST': boat_data[waku]['展示ST']
         }
         ordered_dict = {col: input_dict.get(col, 0.0) for col in train_features}
         input_list.append(ordered_dict)
         
         boat_data[waku]['win_rate'] = win_rate
-        boat_data[waku]['true_skill'] = true_skill_score
-        boat_data[waku]['sanren_rate'] = sanren_rate * 100.0
+        boat_data[waku]['true_skill'] = true_skill
 
-    # 🔥 修正箇所：余計な .astype('category') を削除し、学習時と同じ整数型（int）で渡す
     X_pred = pd.DataFrame(input_list)[train_features]
-    if '会場ID' in X_pred.columns:
-        X_pred['会場ID'] = X_pred['会場ID'].astype(int)
+    if '会場ID' in X_pred.columns: X_pred['会場ID'] = X_pred['会場ID'].astype(int)
+    if '風向' in X_pred.columns: X_pred['風向'] = X_pred['風向'].astype(int)
     
-    # 舟券内に入るAI確率
     lgb_probs = model_lgb.predict_proba(X_pred)[:, 1]
     xgb_probs = model_xgb.predict_proba(X_pred)[:, 1]
     ensemble_scores = (lgb_probs + xgb_probs) / 2.0
@@ -183,10 +183,10 @@ def predict_race_auto_v22(target_date, venue, race_num, is_backtest=False):
     for i in range(6):
         waku = i + 1
         t_name = racer_names.get(boat_data[waku]['登番'], "")
+        f_str = f" [F{boat_data[waku]['F持ち']}]" if boat_data[waku]['F持ち'] > 0 else ""
         c_actual = boat_data[waku]['進入コース']
-        score_details[waku] = f"舟券内AI確率: {ensemble_scores[i]*100:.1f}% (真の実力: {boat_data[waku]['true_skill']:+.3f})"
+        score_details[waku] = f"舟券内AI確率: {ensemble_scores[i]*100:.1f}% (進入{c_actual} / 展ST {boat_data[waku]['展示ST']}){f_str}"
     
-    # 1着確率（アタマ）：コース勝率と実力のみ
     p1_weights = []
     for i in range(1, 7):
         base_win = max(0.001, boat_data[i]['win_rate'])
@@ -194,7 +194,6 @@ def predict_race_auto_v22(target_date, venue, race_num, is_backtest=False):
         p1_weights.append(base_win * (1.0 + max(0, skill * 1.5)))
     p1_probs = np.array(p1_weights) / sum(p1_weights)
 
-    # 2・3着確率（ヒモ）：AI評価最優先
     potentials = []
     for i in range(1, 7):
         ai_prob = ensemble_scores[i-1] 
@@ -232,27 +231,17 @@ def predict_race_auto_v22(target_date, venue, race_num, is_backtest=False):
     prob_sorted = sorted([(c, s * 100) for c, s in raw_probs], key=lambda x: x[1], reverse=True)
     
     top1_3t_prob = prob_sorted[0][1]
-    bets = []
-    is_ken = False
-
+    bets = [x[0] for x in prob_sorted[:4]]
+    
+    result_text = f"🌐 【v23 展開完全認知スナイパー】解析完了！\n"
+    wind_txt = "向かい風" if env_data['風向'] == 1 else "追い風" if env_data['風向'] == 2 else "横風/無風"
+    result_text += f"🌪️ 水面環境: {venue}{race_num}R / {wind_txt} {env_data['風速']}m\n"
+    
     if top1_3t_prob < 15.0:
-        is_ken = True
-        ken_reason = "展開が混戦すぎる（大本命不在によるオッズ割れ・トリガミの危険）"
-        bet_type_name = "🎯 展開狙い（フォーメーション8点）"
-        bets = [x[0] for x in prob_sorted[:8]]
-    else:
-        bet_type_name = "💎 超鉄板（激絞り4点）"
-        bets = [x[0] for x in prob_sorted[:4]]
-
-    if is_ken: bet_type_name = f"⚠️ 見送り推奨 (仮の買い目: {bet_type_name})"
-    
-    result_text = f"🌐 【v22 軽量アルティメット・スナイパー】解析完了！\n"
-    result_text += f"🌪️ 水面環境: {venue} / 風速 {env_data['風速']}m\n"
-    
-    if is_ken: result_text += f"⚠️ 【AI判定: ケン（見送り）】\n⛔ 理由: {ken_reason}\n\n"
+        result_text += f"⚠️ 【AI判定: ケン（見送り）】\n⛔ 理由: 展開が混戦すぎる（オッズ割れ・トリガミの危険）\n\n"
     else: result_text += f"✨ 【AI投資判定】 最強のスイートスポット！勝負可能！\n\n"
     
-    result_text += "📊 各艇のAIスコア詳細\n"
+    result_text += "📊 各艇のAIスコア詳細（展開加味）\n"
     for i in range(1, 7):
         detail = score_details[i]
         t_name = racer_names.get(boat_data[i]['登番'], "")
@@ -262,25 +251,21 @@ def predict_race_auto_v22(target_date, venue, race_num, is_backtest=False):
     result_text += "-" * 50 + "\n"
     for i in range(min(8, len(prob_sorted))):
         result_text += f"第{i+1}推奨: 【{prob_sorted[i][0]}】 (確率 {prob_sorted[i][1]:.1f}%)\n"
-        
-    result_text += f"\n🎯 激絞り買い目指示\n"
-    result_text += "-" * 50 + "\n"
-    result_text += f"👉 買い目（{len(bets)}点）: {', '.join(bets)}\n"
-    result_text += "-" * 50 + "\n"
 
     return {"text": result_text, "boat_data": boat_data}
 
-st.title("🚤 ボートレースAI【v22 軽量アルティメット・スナイパー】")
+st.title("🚤 ボートレースAI【v23 フル覚醒スナイパー】")
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
+st.write("風向き、体重、F持ち、展示ST、進入予想をすべて組み込んだ完全体AIです。")
 col1, col2, col3 = st.columns(3)
 with col1: target_date = st.text_input("日付 (例: 20261105)", value=today_str, key="date1")
 with col2: venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=9, key="venue1")
 with col3: race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1, key="race1")
 
-if st.button("⚡ v22 AI予想！", type="primary"):
-    with st.spinner("会場データと展示気配を加味して計算中..."):
-        res_dict = predict_race_auto_v22(target_date, venue, race_num)
+if st.button("⚡ v23 フル覚醒AI予想！", type="primary"):
+    with st.spinner("展開データ（風向/F持ち/展示ST/進入）をスクレイピング・解析中..."):
+        res_dict = predict_race_auto_v23(target_date, venue, race_num)
         if "error" in res_dict:
             st.error(f"【予想失敗】 {res_dict['error']}")
         else:
