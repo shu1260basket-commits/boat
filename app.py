@@ -10,7 +10,6 @@ import datetime
 import re
 import itertools
 import time
-import plotly.express as px
 import concurrent.futures 
 
 st.set_page_config(page_title="ボートレースAI【v18 最終形態・スナイパー】", layout="wide")
@@ -31,7 +30,7 @@ try:
     motor_stats = brain['motor_stats']
     racer_kimarite = brain['racer_kimarite']
     racer_in_fail = brain['racer_in_fail']
-    racer_names = brain.get('racer_names', {})
+    racer_names = brain.get('racer_names', {}) 
     suji_stats = brain['suji_stats']
     COURSE_AVG_1ST = brain['course_avg_1st']
     sweet_spots = brain.get('sweet_spots', {})
@@ -153,7 +152,7 @@ def show_racer_profile(target_toban):
             break
             
     if not has_data:
-        st.warning(f"⚠️ 登番 {target_toban} のデータは過去の集計期間内に存在しません。（新人選手、または未出走）")
+        st.warning(f"⚠️ 登番 {target_toban} のデータは過去の集計期間内に存在しません。")
         return
         
     racer_name = racer_names.get(target_toban, "")
@@ -200,9 +199,9 @@ def show_racer_profile(target_toban):
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("総出走数 (集計期間)", f"{total_runs}走")
-    col2.metric("🏆 真の実力値 (0基準)", f"{true_skill_score:+.3f}", help="プラスなら全国平均以上。外枠からでも勝てる本物の実力を示します。")
-    col3.metric("🚨 イン崩壊率 (4着以下)", f"{fake_a1_rate:.1f}%", help="1コースに入ったのに舟券外に飛ぶ確率（A1詐欺度）です。")
-    col4.metric("💥 1コースで負ける時の特徴", f"差され: {sasare_rate:.0f}% / まくられ: {makurare_rate:.0f}%")
+    col2.metric("🏆 真の実力値 (0基準)", f"{true_skill_score:+.3f}", help="プラスなら実力派。")
+    col3.metric("🚨 イン崩壊率 (4着以下)", f"{fake_a1_rate:.1f}%", help="インで大敗する確率。")
+    col4.metric("💥 1コース負けパターン", f"差され: {sasare_rate:.0f}% / まくられ: {makurare_rate:.0f}%")
     
     df_course = pd.DataFrame(course_data)
     st.dataframe(df_course.set_index("進入コース"), use_container_width=True)
@@ -212,7 +211,6 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
     if not success: return {"error": msg}
     
     jcd = int(VENUE_MAP[venue])
-    
     target_month = int(str(target_date)[4:6]) if len(str(target_date)) >= 8 else datetime.datetime.now().month
     current_season = get_season(target_month)
     wind_cat = get_wind_category(env_data['風速'])
@@ -263,7 +261,7 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
             'インまくられ率': in_f_stats['makurare'] / max(1, in_f_stats['runs_1c']),
             '真の実力値': true_skill_score, 'イン崩壊率': fake_a1_rate,
             '内側ST差': boat_data[waku]['平均ST'] - inside_st, 
-            '展示平均差': boat_data[waku]['展示'] - tenji_mean
+            '展示平均差': boat_data[waku]['展示'] - tenji_mean 
         }
         ordered_dict = {col: input_dict.get(col, 0.0) for col in train_features}
         input_list.append(ordered_dict)
@@ -271,9 +269,8 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
         c_st_display = racer_course_stats.get((toban, course), {'runs':0, '1st':0, '2nd':0, '3rd':0, '4th6th':0})
         runs_display = c_st_display['runs']
         sanren_count = c_st_display['1st'] + c_st_display['2nd'] + c_st_display['3rd']
-        sanren_rate = (sanren_count / runs_display * 100) if runs_display > 0 else 0.0
         boat_data[waku]['true_skill'] = true_skill_score
-        boat_data[waku]['sanren_rate'] = sanren_rate
+        boat_data[waku]['sanren_rate'] = (sanren_count / runs_display * 100) if runs_display > 0 else 0.0
 
     X_pred = pd.DataFrame(input_list)[train_features]
     
@@ -287,7 +284,6 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
     for i in range(6):
         waku = i + 1
         t_name = racer_names.get(boat_data[waku]['登番'], "")
-        name_str = f" {t_name}" if t_name else ""
         c_actual = boat_data[waku]['進入コース']
         score_details[waku] = f"総合: {ensemble_scores[i]:.2f} (真の実力: {boat_data[waku]['true_skill']:+.3f} / {c_actual}ｺｰｽ3連対率: {boat_data[waku]['sanren_rate']:.1f}%)"
         
@@ -309,6 +305,11 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
         p3_suji = max(0.01, suji_stats['123_matrix'].get((c1, c2, c3), 0) / c12_count)
 
         score = p1 * (p2_pl * p2_suji) * (p3_pl * p3_suji)
+        
+        # 🔥 オッズフィルター的なロジック：大本命の時、スジが合わないものは評価を下げる（過大評価防止）
+        if p1 > 0.4 and (p2_suji < 0.10 or p3_suji < 0.05):
+             score = score * 0.5 
+             
         raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", score))
         
     total_score = sum(x[1] for x in raw_probs)
@@ -321,9 +322,9 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
     ken_reason = ""
     is_ken = False
 
-    if top1_3t_prob < 15.0:
+    if top1_3t_prob < 12.0: # 基準を厳しくして無駄打ちを減らす
         is_ken = True
-        ken_reason = "展開が混戦すぎる（大本命不在）"
+        ken_reason = "展開が混戦すぎる（大本命不在によるオッズ割れリスク）"
         bet_type_name = "🎯 展開スジ狙い（フォーメーション8点）"
         bets = [x[0] for x in prob_sorted[:8]]
     else:
@@ -385,7 +386,7 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
 
 st.title("🚤 ボートレースAI【v18 最終形態・メタ学習スナイパー】")
 
-tab1, tab2, tab3, tab4 = st.tabs(["🚤 通常予想モード", "📊 厳格バックテスト", "🎯 全国スナイパー", "👤 選手プロファイル"])
+tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 厳格バックテスト", "🎯 全国スナイパー"])
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
 with tab1:
@@ -401,7 +402,7 @@ with tab1:
             if "error" in res_dict:
                 st.error(f"【予想失敗】 {res_dict['error']}")
             else:
-                st.text_area("AIのスコア解析結果", value=res_dict["text"], height=440)
+                st.text_area("AIのスコア解析結果", value=res_dict["text"], height=550)
                 
                 st.markdown("---")
                 st.markdown("### 👤 出走選手のディープ・プロファイル")
@@ -542,12 +543,3 @@ with tab3:
                 st.dataframe(df_hot, use_container_width=True)
             else:
                 st.info("現在指定された会場には、AIの得意条件に合致する安全な鉄板レースはありません。（無駄打ち回避成功）")
-
-with tab4:
-    st.header("👤 選手ディープ・プロファイル")
-    st.write("AIの脳内に蓄積された、特定の選手の「真の実力値」「コース別決まり手」「イン大敗率（A1詐欺度）」を丸裸にします。")
-    
-    target_toban = st.number_input("選手の登番を入力 (例: 4320)", min_value=1000, max_value=9999, value=4320, step=1)
-    
-    if st.button("🔍 選手データを解析する", type="primary"):
-        show_racer_profile(target_toban)
