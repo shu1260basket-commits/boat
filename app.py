@@ -311,27 +311,25 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
         c_actual = boat_data[waku]['進入コース']
         score_details[waku] = f"舟券内AI確率: {ensemble_scores[i]*100:.1f}% (真の実力: {boat_data[waku]['true_skill']:+.3f} / {c_actual}ｺｰｽ3連対率: {boat_data[waku]['sanren_rate']:.1f}%)"
     
-    # 🔥 修正1：1着確率（P1）の厳密な算出（確率の合計を絶対に1にする）
+    # 🔥 修正1：1着確率（P1）を「2乗」して本来の本命信頼度を復元
     p1_weights = []
     for i in range(1, 7):
         base_win = max(boat_data[i]['win_rate'], COURSE_AVG_1ST.get(boat_data[i]['進入コース'], 0.0))
         skill = boat_data[i]['true_skill']
-        # 実力とコース勝率で1着を決定
-        w = max(0.001, base_win * (1.0 + max(0, skill * 3.0)))
-        p1_weights.append(w)
-    
+        w = (base_win ** 2) * (1.0 + max(0, skill * 3.0))
+        p1_weights.append(max(0.0001, w))
     p1_probs = np.array(p1_weights) / sum(p1_weights)
 
-    # 🔥 修正2：2・3着力（ポテンシャル）の算出
-    place_weights = []
+    # 🔥 修正2：2・3着の「自力ポテンシャル」
+    potentials = []
     for i in range(1, 7):
-        ai_prob = ensemble_scores[i-1]
+        ai_prob = ensemble_scores[i-1] 
         real_sanren = boat_data[i]['sanren_rate'] / 100.0
         skill = boat_data[i]['true_skill']
-        # AIスコア（峰なら39%）と実績をブレンドし、実力で強烈にブースト
         base_pot = (ai_prob * 0.5) + (real_sanren * 0.5)
-        pot = max(0.001, base_pot * (1.0 + max(0, skill * 5.0)))
-        place_weights.append(pot)
+        bonus = 1.0 + max(0, skill * 5.0)
+        # 2乗してメリハリをつける
+        potentials.append( (base_pot ** 2) * bonus )
         
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
@@ -341,36 +339,35 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
         c2 = course_map[r2]
         c3 = course_map[r3]
         
-        # 1着の確率（1.0から分配された正常な数値）
+        # 1着確率
         p1 = p1_probs[r1]
         
-        # 2着の条件付き確率 (1着を除外して1.0になるよう再計算)
+        # 2着確率（スジ30% ＋ 実力70% の加算ブレンド）
         w2_list = []
         for cand2 in range(6):
             if cand2 == r1:
                 w2_list.append(0)
             else:
                 c_cand2 = course_map[cand2]
-                suji = suji_stats['12_matrix'].get((c1, c_cand2), 0) / max(1, suji_stats['1st_count'].get(c1, 1))
-                # スジはあくまでスパイス（最低保証0.3を持たせることで峰のような実力者が消えない）
-                w2_list.append(place_weights[cand2] * (0.3 + suji * 0.7))
+                suji2 = suji_stats['12_matrix'].get((c1, c_cand2), 0) / max(1, suji_stats['1st_count'].get(c1, 1))
+                w2_list.append( (suji2 * 0.3) + (potentials[cand2] * 0.7) )
         p2 = w2_list[r2] / max(0.0001, sum(w2_list))
         
-        # 3着の条件付き確率 (1,2着を除外して1.0になるよう再計算)
+        # 3着確率（スジ20% ＋ 実力80% の加算ブレンド）
         w3_list = []
         for cand3 in range(6):
             if cand3 == r1 or cand3 == r2:
                 w3_list.append(0)
             else:
                 c_cand3 = course_map[cand3]
-                suji = suji_stats['123_matrix'].get((c1, c2, c_cand3), 0) / max(1, suji_stats['12_matrix'].get((c1, c2), 1))
-                w3_list.append(place_weights[cand3] * (0.3 + suji * 0.7))
+                suji3 = suji_stats['123_matrix'].get((c1, c2, c_cand3), 0) / max(1, suji_stats['12_matrix'].get((c1, c2), 1))
+                w3_list.append( (suji3 * 0.2) + (potentials[cand3] * 0.8) )
         p3 = w3_list[r3] / max(0.0001, sum(w3_list))
         
         score = p1 * p2 * p3
         raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", score))
         
-    total_score = sum(x[1] for x in raw_probs) # これが1.0に限りなく近くなる
+    total_score = sum(x[1] for x in raw_probs)
     prob_sorted = sorted([(c, (s / total_score) * 100) for c, s in raw_probs], key=lambda x: x[1], reverse=True)
     
     top1_3t_prob = prob_sorted[0][1]
