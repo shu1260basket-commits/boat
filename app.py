@@ -311,57 +311,40 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
         c_actual = boat_data[waku]['進入コース']
         score_details[waku] = f"舟券内AI確率: {ensemble_scores[i]*100:.1f}% (真の実力: {boat_data[waku]['true_skill']:+.3f} / {c_actual}ｺｰｽ3連対率: {boat_data[waku]['sanren_rate']:.1f}%)"
     
-    # 🔥 修正1：1着確率（P1）を「2乗」して本来の本命信頼度を復元
+    # 🔥 修正1：1着確率（P1）の算出（コース勝率をベースに、実力を指数ブースト）
     p1_weights = []
     for i in range(1, 7):
         base_win = max(boat_data[i]['win_rate'], COURSE_AVG_1ST.get(boat_data[i]['進入コース'], 0.0))
         skill = boat_data[i]['true_skill']
-        w = (base_win ** 2) * (1.0 + max(0, skill * 3.0))
+        w = base_win * np.exp(skill * 5.0) 
         p1_weights.append(max(0.0001, w))
     p1_probs = np.array(p1_weights) / sum(p1_weights)
 
-    # 🔥 修正2：2・3着の「自力ポテンシャル」
+    # 🔥 修正2：2・3着の「超・実力重視ポテンシャル」
     potentials = []
     for i in range(1, 7):
         ai_prob = ensemble_scores[i-1] 
         real_sanren = boat_data[i]['sanren_rate'] / 100.0
         skill = boat_data[i]['true_skill']
+        
         base_pot = (ai_prob * 0.5) + (real_sanren * 0.5)
-        bonus = 1.0 + max(0, skill * 5.0)
-        # 2乗してメリハリをつける
-        potentials.append( (base_pot ** 2) * bonus )
+        # 実力が高い（+0.1以上）選手を指数関数的にバフして、コースの不利を相殺する
+        bonus = np.exp(skill * 15.0)
+        potentials.append(base_pot * bonus)
         
     combos = list(itertools.permutations([0, 1, 2, 3, 4, 5], 3))
     raw_probs = []
     
+    # 🔥 修正3：スジの掛け算を廃止し、純粋な条件付き確率で120通りをピッタリ100%にする
     for (r1, r2, r3) in combos:
-        c1 = course_map[r1]
-        c2 = course_map[r2]
-        c3 = course_map[r3]
-        
-        # 1着確率
         p1 = p1_probs[r1]
         
-        # 2着確率（スジ30% ＋ 実力70% の加算ブレンド）
-        w2_list = []
-        for cand2 in range(6):
-            if cand2 == r1:
-                w2_list.append(0)
-            else:
-                c_cand2 = course_map[cand2]
-                suji2 = suji_stats['12_matrix'].get((c1, c_cand2), 0) / max(1, suji_stats['1st_count'].get(c1, 1))
-                w2_list.append( (suji2 * 0.3) + (potentials[cand2] * 0.7) )
+        # 1着を除いたメンバーで2着確率を計算
+        w2_list = [potentials[i] if i != r1 else 0 for i in range(6)]
         p2 = w2_list[r2] / max(0.0001, sum(w2_list))
         
-        # 3着確率（スジ20% ＋ 実力80% の加算ブレンド）
-        w3_list = []
-        for cand3 in range(6):
-            if cand3 == r1 or cand3 == r2:
-                w3_list.append(0)
-            else:
-                c_cand3 = course_map[cand3]
-                suji3 = suji_stats['123_matrix'].get((c1, c2, c_cand3), 0) / max(1, suji_stats['12_matrix'].get((c1, c2), 1))
-                w3_list.append( (suji3 * 0.2) + (potentials[cand3] * 0.8) )
+        # 1,2着を除いたメンバーで3着確率を計算
+        w3_list = [potentials[i] if i not in (r1, r2) else 0 for i in range(6)]
         p3 = w3_list[r3] / max(0.0001, sum(w3_list))
         
         score = p1 * p2 * p3
@@ -377,7 +360,7 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
     ken_reason = ""
     is_ken = False
 
-    if top1_3t_prob < 12.0:
+    if top1_3t_prob < 10.0:
         is_ken = True
         ken_reason = "展開が混戦すぎる（大本命不在によるオッズ割れ・トリガミの危険）"
         bet_type_name = "🎯 展開スジ狙い（フォーメーション8点）"
@@ -396,7 +379,7 @@ def predict_race_auto_v20(target_date, venue, race_num, is_backtest=False):
     if is_ken:
         bet_type_name = f"⚠️ 見送り推奨 (仮の買い目: {bet_type_name})"
 
-    is_easy_hit = (top1_3t_prob >= 12.0) and not is_ken
+    is_easy_hit = (top1_3t_prob >= 10.0) and not is_ken
 
     if is_backtest:
         return {
