@@ -12,11 +12,11 @@ import itertools
 import time
 import concurrent.futures 
 
-st.set_page_config(page_title="ボートレースAI【v18 最終形態・スナイパー】", layout="wide")
+st.set_page_config(page_title="ボートレースAI【v19 展開認知・スナイパー】", layout="wide")
 
 @st.cache_resource
 def load_brain():
-    with open('boat_ai_brain_v18_final.pkl', 'rb') as f:
+    with open('boat_ai_brain_v19.pkl', 'rb') as f:
         saved_data = pickle.load(f)
     return saved_data
 
@@ -35,7 +35,7 @@ try:
     COURSE_AVG_1ST = brain['course_avg_1st']
     sweet_spots = brain.get('sweet_spots', {})
 except Exception as e:
-    st.error(f"⚠️ `boat_ai_brain_v18_final.pkl` の読み込みエラー: {e}")
+    st.error(f"⚠️ `boat_ai_brain_v19.pkl` の読み込みエラー: {e}")
     st.stop()
 
 VENUE_MAP = {
@@ -199,8 +199,8 @@ def show_racer_profile(target_toban):
     
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("総出走数 (集計期間)", f"{total_runs}走")
-    col2.metric("🏆 真の実力値 (0基準)", f"{true_skill_score:+.3f}", help="プラスなら実力派。")
-    col3.metric("🚨 イン崩壊率 (4着以下)", f"{fake_a1_rate:.1f}%", help="インで大敗する確率。")
+    col2.metric("🏆 真の実力値 (0基準)", f"{true_skill_score:+.3f}")
+    col3.metric("🚨 イン崩壊率 (4着以下)", f"{fake_a1_rate:.1f}%")
     col4.metric("💥 1コース負けパターン", f"差され: {sasare_rate:.0f}% / まくられ: {makurare_rate:.0f}%")
     
     df_course = pd.DataFrame(course_data)
@@ -219,6 +219,26 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
     tenji_array = [boat_data[w]['展示'] for w in range(1, 7)]
     tenji_mean = np.mean(tenji_array)
     course_map = {w-1: boat_data[w]['進入コース'] for w in range(1, 7)}
+
+    # 🔥 展開認知のための事前計算
+    c1_win_rate = 0.55
+    c2_st = 0.17
+    max_dash_makuri = 0.0
+    
+    for i in range(1, 7):
+        toban = boat_data[i]['登番']
+        course = boat_data[i]['進入コース']
+        c_stats_tmp = racer_course_stats.get((toban, course), {'runs':0, '1st':0})
+        k_stats_tmp = racer_kimarite.get((toban, course), {'makuri':0})
+        total_wins_tmp = max(1, sum(racer_kimarite.get((toban, course), {'a':0}).values()))
+        
+        if course == 1:
+            c1_win_rate = c_stats_tmp['1st'] / max(1, c_stats_tmp['runs'])
+        elif course == 2:
+            c2_st = boat_data[i]['平均ST']
+        elif course >= 4:
+            m_rate = k_stats_tmp.get('makuri', 0) / max(1, total_wins_tmp)
+            if m_rate > max_dash_makuri: max_dash_makuri = m_rate
 
     input_list = []
     for i in range(6):
@@ -261,7 +281,10 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
             'インまくられ率': in_f_stats['makurare'] / max(1, in_f_stats['runs_1c']),
             '真の実力値': true_skill_score, 'イン崩壊率': fake_a1_rate,
             '内側ST差': boat_data[waku]['平均ST'] - inside_st, 
-            '展示平均差': boat_data[waku]['展示'] - tenji_mean 
+            '展示平均差': boat_data[waku]['展示'] - tenji_mean,
+            '1コース信頼度': c1_win_rate,
+            '2コース壁ST': c2_st,
+            'ダッシュ攻め力': max_dash_makuri
         }
         ordered_dict = {col: input_dict.get(col, 0.0) for col in train_features}
         input_list.append(ordered_dict)
@@ -305,11 +328,6 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
         p3_suji = max(0.01, suji_stats['123_matrix'].get((c1, c2, c3), 0) / c12_count)
 
         score = p1 * (p2_pl * p2_suji) * (p3_pl * p3_suji)
-        
-        # 🔥 オッズフィルター的なロジック：大本命の時、スジが合わないものは評価を下げる（過大評価防止）
-        if p1 > 0.4 and (p2_suji < 0.10 or p3_suji < 0.05):
-             score = score * 0.5 
-             
         raw_probs.append((f"{r1+1}-{r2+1}-{r3+1}", score))
         
     total_score = sum(x[1] for x in raw_probs)
@@ -322,18 +340,19 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
     ken_reason = ""
     is_ken = False
 
-    if top1_3t_prob < 12.0: # 基準を厳しくして無駄打ちを減らす
+    # 🔥 見送り基準を15.0% -> 18.0% に引き上げ、勝てないレースを徹底排除
+    if top1_3t_prob < 18.0:
         is_ken = True
-        ken_reason = "展開が混戦すぎる（大本命不在によるオッズ割れリスク）"
+        ken_reason = "展開が混戦すぎる（大本命不在によるオッズ割れ・トリガミの危険）"
         bet_type_name = "🎯 展開スジ狙い（フォーメーション8点）"
         bets = [x[0] for x in prob_sorted[:8]]
     else:
-        if ai_historical_hit_rate < 20.0:
+        if ai_historical_hit_rate < 25.0:
             is_ken = True
             ken_reason = f"AIの苦手条件（{venue} × {current_season} × {wind_cat} の過去的中率 {ai_historical_hit_rate:.1f}%）"
-        elif env_data['風速'] >= 6.0:
+        elif env_data['風速'] >= 5.0:
             is_ken = True
-            ken_reason = "暴風による水面悪化（不確定要素大）"
+            ken_reason = "強風による水面悪化（不確定要素大）"
             
         bet_type_name = "💎 究極スジ・超鉄板（激絞り4点）"
         bets = [x[0] for x in prob_sorted[:4]]
@@ -341,7 +360,7 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
     if is_ken:
         bet_type_name = f"⚠️ 見送り推奨 (仮の買い目: {bet_type_name})"
 
-    is_easy_hit = (top1_3t_prob >= 15.0) and not is_ken
+    is_easy_hit = (top1_3t_prob >= 18.0) and not is_ken
 
     if is_backtest:
         return {
@@ -355,7 +374,7 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
             "ai_hit_rate": ai_historical_hit_rate
         }
     
-    result_text = f"🌐 【v18 最終形態・メタ学習スナイパー】解析完了！\n"
+    result_text = f"🌐 【v19 展開認知・メタ学習スナイパー】解析完了！\n"
     result_text += f"🌪️ 水面環境: {venue} / {current_season} / 風速 {env_data['風速']}m ({wind_cat})\n"
     result_text += f"🧠 この条件でのAI過去的中率: {ai_historical_hit_rate:.1f}%\n"
     result_text += f"🎯 AI推奨 3連単1番人気 信頼度: {top1_3t_prob:.1f}%\n\n"
@@ -384,19 +403,19 @@ def predict_race_auto_v18(target_date, venue, race_num, is_backtest=False):
 
     return {"text": result_text, "boat_data": boat_data}
 
-st.title("🚤 ボートレースAI【v18 最終形態・メタ学習スナイパー】")
+st.title("🚤 ボートレースAI【v19 展開認知・メタ学習スナイパー】")
 
 tab1, tab2, tab3 = st.tabs(["🚤 通常予想モード", "📊 厳格バックテスト", "🎯 全国スナイパー"])
 today_str = datetime.datetime.now().strftime('%Y%m%d')
 
 with tab1:
-    st.write("「選手の実力」「スジ展開」に加え、AI自身が「自分の得意な季節・風速・会場」を理解してリスクを回避します。")
+    st.write("「選手の実力」「壁の有無」「ダッシュの破壊力」を認知し、AI自身がリスクを回避します。")
     col1, col2, col3 = st.columns(3)
     with col1: target_date = st.text_input("日付 (例: 20261105)", value=today_str, key="date1")
     with col2: venue = st.selectbox("会場", options=list(VENUE_MAP.keys()), index=9, key="venue1")
     with col3: race_num = st.number_input("レース番号", min_value=1, max_value=12, value=5, step=1, key="race1")
 
-    if st.button("⚡ v18 メタ学習AI予想！", type="primary"):
+    if st.button("⚡ v19 展開認知AI予想！", type="primary"):
         with st.spinner("AIのスイートスポットを照合し、展開を計算中..."):
             res_dict = predict_race_auto_v18(target_date, venue, race_num)
             if "error" in res_dict:
