@@ -32,8 +32,6 @@ try:
     suji_stats = brain['suji_stats']
     COURSE_AVG_1ST = brain['course_avg_1st']
     sweet_spots = brain.get('sweet_spots', {})
-    
-    # 🔥 v23で復活した辞書データを読み込み
     racer_kimarite = brain.get('racer_kimarite', {})
     racer_in_fail = brain.get('racer_in_fail', {})
 except Exception as e:
@@ -75,11 +73,8 @@ def scrape_boatrace_data(target_date, venue, race_num):
     try:
         res_list = session.get(url_list, timeout=15)
         res_list.encoding = 'utf-8'
-        if res_list.status_code != 200: return None, None, False, f"通信ブロック ({res_list.status_code})"
-
         soup_list = BeautifulSoup(res_list.text, 'html.parser')
         tbodies_list = soup_list.find_all('tbody', class_='is-fs12')
-        if len(tbodies_list) < 6: return None, None, False, "休催日 または データ未公開"
             
         for waku, tbody in enumerate(tbodies_list[:6], 1):
             text_data = tbody.text.replace('\n', ' ')
@@ -93,8 +88,14 @@ def scrape_boatrace_data(target_date, venue, race_num):
             f_match = re.search(r'F(\d)', text_data)
             f_count = int(f_match.group(1)) if f_match else 0
             
-            avg_st_matches = re.findall(r'0\.\d{2}', text_data)
-            avg_st = float(avg_st_matches[0]) if avg_st_matches else 0.17
+            # 🔥 バグ修正：平均STを強制抽出
+            st_matches = re.findall(r'([FL]?0\.\d{2})', text_data)
+            avg_st = 0.17
+            if st_matches:
+                try:
+                    avg_st = float(st_matches[0].replace('F', '').replace('L', ''))
+                except:
+                    pass
             
             try: motor = int(re.findall(r'\b(\d{1,3})\b', text_data)[-6])
             except: motor = 0
@@ -123,17 +124,18 @@ def scrape_boatrace_data(target_date, venue, race_num):
             if len(floats) >= 4:
                 boat_data[waku]['展示'] = float(floats[0]) if float(floats[0]) > 5.0 else 0.0
         
+        # 🔥 バグ修正：展示STをタグに依存せず、直前情報のテキスト全体から抽出
         for w in range(1, 7):
-            time_span = soup_before.find('span', class_=f'table1_boatImage{w}TimeInner')
-            if not time_span:
-                time_span = soup_before.find('span', class_=f'table1_boatImage{w}Time')
-            if time_span:
-                st_text = time_span.text.strip()
-                val_str = re.sub(r'[A-Za-z]', '', st_text).replace('-', '')
-                try:
-                    if val_str: boat_data[w]['展示ST'] = float(val_str)
-                except:
-                    pass
+            try:
+                # 枠番に応じたSTの要素を探す
+                row = soup_before.find_all('tbody', class_='is-fs12')[w-1]
+                row_text = row.text.replace('\n', ' ')
+                # 展示タイム等の小数以外で、0.xxの形式のものを探す（通常、右側にある）
+                st_matches = re.findall(r'([FL]?0\.\d{2})', row_text)
+                if st_matches:
+                    boat_data[w]['展示ST'] = float(st_matches[-1].replace('F', '').replace('L', ''))
+            except:
+                pass
 
         course_match = re.findall(r'(\d)コース', before_text)
         if len(course_match) >= 6:
@@ -251,16 +253,25 @@ def predict_race_auto_v23(target_date, venue, race_num, is_backtest=False):
         motor = boat_data[waku]['モーター']
         course = boat_data[waku]['進入コース']
         
-        total_runs_all, total_value = 0, 0.0
+        total_runs_all, total_value, in_crash, in_runs_total = 0, 0.0, 0, 0
         for c in range(1, 7):
-            c_st = racer_course_stats.get((toban, c), {'runs':0, '1st':0, '2nd':0, '3rd':0})
+            c_st = racer_course_stats.get((toban, c), {'runs':0, '1st':0, '2nd':0, '3rd':0, '4th6th':0})
             total_runs_all += c_st['runs']
             total_value += c_st['1st'] - (c_st['runs'] * COURSE_AVG_1ST.get(c, 0.0))
+            if c == 1:
+                in_runs_total = c_st['runs']
+                in_crash = c_st.get('4th6th', 0)
 
         true_skill = total_value / max(1, total_runs_all)
+        fake_a1_rate = (in_crash / in_runs_total) if in_runs_total > 0 else 0.0
+        
         c_stats = racer_course_stats.get((toban, course), {'runs':1, '1st':0, '2nd':0, '3rd':0})
         v_stats = racer_venue_stats.get((toban, jcd), {'runs':1, '1st':0, '2nd':0})
         m_stats = motor_stats.get((jcd, motor), {'runs':1, '1st':0, '2nd':0})
+        
+        k_stats = racer_kimarite.get((toban, course), {'nige':0, 'sashi':0, 'makuri':0, 'makurisashi':0})
+        total_wins = max(1, sum(k_stats.values()))
+        in_f_stats = racer_in_fail.get(toban, {'runs_1c':1, 'sasare':0, 'makurare':0})
         
         inside_st = st_array[i-1] if i > 0 else st_array[i]
         runs_c = max(1, c_stats['runs'])
@@ -276,7 +287,12 @@ def predict_race_auto_v23(target_date, venue, race_num, is_backtest=False):
             'コース3連対率': sanren_rate,
             '当地1着率': v_stats['1st'] / max(1, v_stats['runs']),
             'モーター2連対率': (m_stats['1st'] + m_stats['2nd']) / max(1, m_stats['runs']),
+            'まくり比率': k_stats.get('makuri', 0) / max(1, total_wins),
+            '差し比率': (k_stats.get('sashi', 0) + k_stats.get('makurisashi', 0)) / max(1, total_wins),
+            'イン差され率': in_f_stats.get('sasare', 0) / max(1, in_f_stats.get('runs_1c', 1)),
+            'インまくられ率': in_f_stats.get('makurare', 0) / max(1, in_f_stats.get('runs_1c', 1)),
             '真の実力値': true_skill,
+            'イン崩壊率': fake_a1_rate,
             '内側ST差': boat_data[waku]['平均ST'] - inside_st, 
             '展示平均差': boat_data[waku]['展示'] - tenji_mean,
             'F持ち': boat_data[waku]['F持ち'],
